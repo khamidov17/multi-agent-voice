@@ -1,11 +1,11 @@
-# Claudir
+# Nemo
 
 A Telegram bot powered by Claude AI. Combines spam filtering with an AI chat participant.
 
 ## Features
 
 **Spam Filtering**
-- Two-tier classification: fast regex prefilter + Claude Haiku for ambiguous messages
+- Two-tier classification: fast regex prefilter + Claude Sonnect for ambiguous messages
 - Strike system: configurable strikes before auto-ban
 - Owner exemption
 
