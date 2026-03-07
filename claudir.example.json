@@ -1,0 +1,17 @@
+{
+  "telegram_bot_token": "your-bot-token-here",
+  "anthropic_api_key": "your-anthropic-api-key-here",
+  "gemini_api_key": "your-gemini-api-key-here",
+  "openai_api_key": "your-openai-api-key-here",
+  "groq_api_key": "your-groq-api-key-here",
+  "owner_ids": [123456789],
+  "allowed_groups": [-1001234567890],
+  "trusted_channels": [],
+  "max_strikes": 3,
+  "dry_run": false,
+  "log_chat_id": null,
+  "data_dir": "data/prod",
+  "live_app_url": null,
+  "live_app_port": 3001,
+  "ngrok_auth_token": "your-ngrok-auth-token"
+}

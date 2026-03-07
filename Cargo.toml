@@ -1,0 +1,34 @@
+[package]
+name = "claudir"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+integ_test = []
+
+[dependencies]
+teloxide = { version = "0.17", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+async-trait = "0.1"
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+base64 = "0.22.1"
+whisper-rs = "0.15"
+rusqlite = { version = "0.33", features = ["bundled"] }
+calamine = "0.26"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+axum = "0.7"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+form_urlencoded = "1"
+urlencoding = "2"
+rust_xlsxwriter = "0.81"

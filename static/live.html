@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Nemo Live</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0d0d0d;
+      color: #fff;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .container {
+      text-align: center;
+      padding: 24px 16px;
+      width: 100%;
+      max-width: 400px;
+    }
+
+    h1 { font-size: 26px; font-weight: 700; margin-bottom: 24px; }
+
+    .orb-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 20px;
+    }
+
+    .orb {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 48px;
+      transition: background 0.3s;
+      background: #1a1a1a;
+    }
+
+    .orb.connecting    { background: #1a1a2e; animation: pulse-blue 1.5s infinite; }
+    .orb.listening     { background: #0d2b0d; animation: pulse-green 2s infinite; }
+    .orb.you-speaking  { background: #1a2b00; animation: pulse-lime 0.6s infinite; }
+    .orb.nemo-speaking { background: #001a2b; animation: pulse-cyan 0.8s infinite; }
+    .orb.error         { background: #2b0000; }
+    .orb.disconnected  { background: #1a1a1a; opacity: 0.5; }
+
+    @keyframes pulse-blue  { 0%,100%{box-shadow:0 0 0 0 rgba(85,136,255,.4)}  50%{box-shadow:0 0 0 20px rgba(85,136,255,0)} }
+    @keyframes pulse-green { 0%,100%{box-shadow:0 0 0 0 rgba(85,255,136,.35)} 50%{box-shadow:0 0 0 24px rgba(85,255,136,0)} }
+    @keyframes pulse-lime  { 0%,100%{box-shadow:0 0 0 0 rgba(180,255,50,.5)} 50%{box-shadow:0 0 0 28px rgba(180,255,50,0)} }
+    @keyframes pulse-cyan  { 0%,100%{box-shadow:0 0 0 0 rgba(50,220,255,.5)} 50%{box-shadow:0 0 0 32px rgba(50,220,255,0)} }
+
+    #status {
+      font-size: 15px;
+      color: #aaa;
+      margin-bottom: 20px;
+      min-height: 22px;
+      line-height: 1.4;
+    }
+    #status.error { color: #ff5555; }
+    #status.active { color: #55ff88; }
+
+    #transcript {
+      padding: 12px;
+      background: #1a1a1a;
+      border-radius: 12px;
+      font-size: 13px;
+      color: #ccc;
+      text-align: left;
+      max-height: 180px;
+      overflow-y: auto;
+      line-height: 1.5;
+      display: none;
+      margin-bottom: 16px;
+    }
+    #transcript.visible { display: block; }
+
+    .msg { margin-bottom: 6px; }
+    .msg.you  { color: #aaccff; }
+    .msg.nemo { color: #aaffcc; }
+
+    .timeout-bar-wrap {
+      height: 3px;
+      background: #222;
+      border-radius: 2px;
+      overflow: hidden;
+      margin-bottom: 16px;
+      display: none;
+    }
+    .timeout-bar-wrap.visible { display: block; }
+    #timeout-bar { height: 100%; background: #2a4a6a; transition: width 1s linear; width: 100%; }
+
+    #action-btn {
+      padding: 10px 28px;
+      border-radius: 24px;
+      border: 1px solid #444;
+      background: transparent;
+      color: #888;
+      font-size: 14px;
+      cursor: pointer;
+      transition: all 0.15s;
+      display: none;
+    }
+    #action-btn:hover { border-color: #666; color: #ccc; }
+    #action-btn.visible { display: inline-block; }
+    #action-btn.danger  { border-color: #883333; color: #ff7777; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🤖 Nemo Live</h1>
+    <div class="orb-wrap">
+      <div class="orb connecting" id="orb">🤖</div>
+    </div>
+    <div id="status">Connecting...</div>
+    <div id="transcript"></div>
+    <div class="timeout-bar-wrap" id="timeout-bar-wrap">
+      <div id="timeout-bar"></div>
+    </div>
+    <button id="action-btn">Disconnect</button>
+  </div>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) { tg.expand(); tg.ready(); }
+
+    const orbEl          = document.getElementById('orb');
+    const statusEl       = document.getElementById('status');
+    const transcriptEl   = document.getElementById('transcript');
+    const actionBtn      = document.getElementById('action-btn');
+    const timeoutBarWrap = document.getElementById('timeout-bar-wrap');
+    const timeoutBar     = document.getElementById('timeout-bar');
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    let ws           = null;
+    let audioCtx     = null;   // 16kHz — mic input
+    let playCtx      = null;   // 24kHz — Nemo audio output
+    let mediaStream  = null;
+    let processor    = null;
+    let geminiApiKey = null;
+    let audioQueue   = [];
+    let isPlaying    = false;
+    let nextPlayTime = 0;
+    let currentState = 'connecting';
+    let lastActivityAt  = Date.now();
+    let silenceWatchdog = null;
+
+    const SILENCE_TIMEOUT_MS = 5 * 60 * 1000;  // 5 minutes
+    const SPEAKING_RMS       = 0.01;            // RMS threshold for voice detection
+
+    // ── UI helpers ────────────────────────────────────────────────────────────
+    function setState(state, msg) {
+      currentState = state;
+      const icons = { connecting:'🤖', listening:'🎤', 'you-speaking':'🗣️', 'nemo-speaking':'🔊', error:'❌', disconnected:'💤' };
+      const labels= { connecting:'Connecting...', listening:'Listening...', 'you-speaking':"You're speaking...", 'nemo-speaking':'Nemo is speaking...', disconnected:'Disconnected' };
+
+      orbEl.className = 'orb ' + state;
+      orbEl.textContent = icons[state] || '🤖';
+      statusEl.textContent = msg || labels[state] || '';
+      statusEl.className = state === 'error' ? 'error' : (state !== 'connecting' && state !== 'disconnected' ? 'active' : '');
+
+      const live = state === 'listening' || state === 'you-speaking' || state === 'nemo-speaking';
+      if (live) {
+        actionBtn.textContent = 'Disconnect';
+        actionBtn.className = 'visible danger';
+        actionBtn.onclick = disconnect;
+      } else if (state === 'error' || state === 'disconnected') {
+        actionBtn.textContent = 'Reconnect';
+        actionBtn.className = 'visible';
+        actionBtn.onclick = start;
+      } else {
+        actionBtn.className = '';
+      }
+    }
+
+    function addTranscript(who, text) {
+      transcriptEl.classList.add('visible');
+      const div = document.createElement('div');
+      div.className = 'msg ' + who;
+      div.textContent = (who === 'you' ? 'You: ' : 'Nemo: ') + text;
+      transcriptEl.appendChild(div);
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    // ── Silence watchdog ──────────────────────────────────────────────────────
+    function touchActivity() { lastActivityAt = Date.now(); }
+
+    function startWatchdog() {
+      stopWatchdog();
+      lastActivityAt = Date.now();
+      timeoutBarWrap.classList.add('visible');
+      timeoutBar.style.width = '100%';
+
+      silenceWatchdog = setInterval(() => {
+        const elapsed  = Date.now() - lastActivityAt;
+        const remaining= Math.max(0, SILENCE_TIMEOUT_MS - elapsed);
+        timeoutBar.style.width = (remaining / SILENCE_TIMEOUT_MS * 100) + '%';
+
+        if (elapsed >= SILENCE_TIMEOUT_MS) {
+          disconnect();
+          setState('disconnected', 'Auto-disconnected after 5 min silence');
+        }
+      }, 1000);
+    }
+
+    function stopWatchdog() {
+      if (silenceWatchdog) { clearInterval(silenceWatchdog); silenceWatchdog = null; }
+      timeoutBarWrap.classList.remove('visible');
+    }
+
+    // ── Auth ──────────────────────────────────────────────────────────────────
+    async function fetchConfig() {
+      const initData = tg?.initData || '';
+      let res;
+      try {
+        res = await fetch('/api/live-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ init_data: initData }),
+        });
+      } catch (e) {
+        throw new Error('Cannot reach server: ' + e.message);
+      }
+      if (res.status === 401) throw new Error('Not authorized — open via Telegram');
+      if (res.status === 403) throw new Error('Owner access only');
+      if (res.status === 503) throw new Error('Gemini API key not configured on server');
+      if (!res.ok) throw new Error('Server error HTTP ' + res.status);
+      const data = await res.json();
+      if (!data.gemini_api_key) throw new Error('API key missing in server response');
+      return data.gemini_api_key;
+    }
+
+    // ── Gemini WebSocket ──────────────────────────────────────────────────────
+    function connectGemini(apiKey) {
+      return new Promise((resolve, reject) => {
+        const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+        ws = new WebSocket(url);
+
+        const timeout = setTimeout(() => {
+          ws.close();
+          reject(new Error('WebSocket connection timed out (15s)'));
+        }, 15000);
+
+        ws.onopen = () => {
+          ws.send(JSON.stringify({
+            setup: {
+              model: 'models/gemini-2.5-flash-native-audio-preview-12-2025',
+              generationConfig: {
+                responseModalities: ['AUDIO'],
+                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } }
+              },
+              realtimeInputConfig: { automaticActivityDetection: {} },
+              systemInstruction: {
+                parts: [{ text: `You are Nemo, a friendly AI assistant made by Avazbek. CRITICAL RULE: Every single turn, detect the EXACT language the user just spoke and respond ONLY in that language — even if they switch languages mid-conversation. Russian turn → reply in Russian. Uzbek turn → reply in Uzbek. English turn → reply in English. NEVER mix languages. Switch IMMEDIATELY when the language changes. Keep replies concise and natural like a voice conversation.` }]
+              }
+            }
+          }));
+        };
+
+        ws.onmessage = async (event) => {
+          let data;
+          try {
+            const text = event.data instanceof Blob ? await event.data.text() : event.data;
+            data = JSON.parse(text);
+          } catch { return; }
+
+          if (data.setupComplete) {
+            clearTimeout(timeout);
+            resolve();
+            return;
+          }
+
+          // User speech transcription
+          const userText = data.serverContent?.inputTranscription?.text;
+          if (userText) { addTranscript('you', userText); touchActivity(); }
+
+          // Nemo audio + text
+          const parts = data.serverContent?.modelTurn?.parts || [];
+          for (const part of parts) {
+            if (part.inlineData?.mimeType?.startsWith('audio/pcm')) {
+              queuePCM(part.inlineData.data);
+              if (currentState !== 'nemo-speaking') setState('nemo-speaking');
+              touchActivity();
+            }
+            if (part.text) addTranscript('nemo', part.text);
+          }
+
+          if (data.serverContent?.turnComplete) {
+            touchActivity();
+            if (currentState === 'nemo-speaking' && audioQueue.length === 0 && !isPlaying) {
+              setState('listening');
+            }
+          }
+        };
+
+        ws.onerror = () => { /* onclose follows */ };
+
+        ws.onclose = (event) => {
+          clearTimeout(timeout);
+          ws = null;
+          stopMic();
+          stopWatchdog();
+          if (currentState === 'disconnected') return;
+          const reason = event.reason ? ' — ' + event.reason : '';
+          const code   = event.code !== 1000 ? ' (code ' + event.code + ')' : '';
+          setState('error', 'Disconnected' + code + reason);
+        };
+      });
+    }
+
+    // ── Microphone ────────────────────────────────────────────────────────────
+    async function startMic() {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000, latencyHint: 'interactive' });
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          googEchoCancellation: true,
+          googNoiseSuppression: true,
+          googAutoGainControl: true,
+          googHighpassFilter: true,
+        }
+      });
+
+      const source = audioCtx.createMediaStreamSource(mediaStream);
+      processor    = audioCtx.createScriptProcessor(2048, 1, 1);
+
+      processor.onaudioprocess = (e) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+        const pcm = e.inputBuffer.getChannelData(0);
+
+        // Compute RMS for voice indicator
+        let sum = 0;
+        for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
+        const rms = Math.sqrt(sum / pcm.length);
+
+        if (rms > SPEAKING_RMS) {
+          if (currentState === 'listening') setState('you-speaking');
+          touchActivity();
+        } else if (currentState === 'you-speaking') {
+          setState('listening');
+        }
+
+        // Encode to PCM16 + base64
+        const int16  = new Int16Array(pcm.length);
+        for (let i = 0; i < pcm.length; i++) int16[i] = Math.max(-32768, Math.min(32767, pcm[i] * 32768));
+        const bytes  = new Uint8Array(int16.buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+
+        ws.send(JSON.stringify({
+          realtimeInput: { mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: btoa(binary) }] }
+        }));
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+    }
+
+    function stopMic() {
+      if (processor)   { processor.disconnect(); processor = null; }
+      if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+    }
+
+    // ── Audio playback ────────────────────────────────────────────────────────
+    function queuePCM(base64) {
+      audioQueue.push(base64);
+      if (!isPlaying) playNext();
+    }
+
+    function playNext() {
+      if (audioQueue.length === 0) {
+        isPlaying = false;
+        if (currentState === 'nemo-speaking') setState('listening');
+        return;
+      }
+      isPlaying = true;
+      const base64  = audioQueue.shift();
+      const binary  = atob(base64);
+      const bytes   = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const int16   = new Int16Array(bytes.buffer);
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+      // Dedicated 24kHz playback context for Nemo's voice output
+      if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000, latencyHint: 'interactive' });
+      if (playCtx.state === 'suspended') playCtx.resume();
+      const buffer = playCtx.createBuffer(1, float32.length, 24000);
+      buffer.getChannelData(0).set(float32);
+      const src = playCtx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(playCtx.destination);
+      const t = Math.max(playCtx.currentTime, nextPlayTime);
+      src.start(t);
+      nextPlayTime = t + buffer.duration;
+      src.onended = playNext;
+    }
+
+    // ── Main flow ─────────────────────────────────────────────────────────────
+    async function start() {
+      setState('connecting');
+      audioQueue   = [];
+      isPlaying    = false;
+      nextPlayTime = 0;
+      if (playCtx) { playCtx.close().catch(() => {}); playCtx = null; }
+
+      try {
+        if (!geminiApiKey) geminiApiKey = await fetchConfig();
+        await connectGemini(geminiApiKey);
+        await startMic();
+        setState('listening');
+        startWatchdog();
+      } catch (e) {
+        geminiApiKey = null;
+        setState('error', '❌ ' + e.message);
+      }
+    }
+
+    function disconnect() {
+      setState('disconnected');
+      stopMic();
+      stopWatchdog();
+      audioQueue = [];
+      if (ws) { ws.close(1000, 'user disconnect'); ws = null; }
+    }
+
+    // ── Boot ──────────────────────────────────────────────────────────────────
+    start();
+  </script>
+</body>
+</html>

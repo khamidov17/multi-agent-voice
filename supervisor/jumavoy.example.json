@@ -1,0 +1,7 @@
+{
+  "bot_token": "your-bot-token-here",
+  "owner_id": 123456789,
+  "allowed_group": null,
+  "nemo_dir": "/opt/nemo",
+  "data_dir": "data/prod"
+}

@@ -1,0 +1,21 @@
+[Unit]
+Description=Jumavoy Supervisor Bot
+After=network.target nemo.service
+Wants=nemo.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jumavoy
+ExecStart=/opt/jumavoy/target/release/jumavoy /opt/jumavoy/data/prod/jumavoy.json
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jumavoy
+
+# Allow full system access (intentional — supervisor needs it)
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

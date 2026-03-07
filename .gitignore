@@ -1,0 +1,14 @@
+/target
+/logs
+claudir.json
+claudir-test.json
+.DS_Store
+
+# Data directories (runtime state - never commit)
+data/
+
+# Claude Code local settings (may contain API keys)
+.claude/settings.local.json
+
+# Supervisor build artifacts
+supervisor/target/
