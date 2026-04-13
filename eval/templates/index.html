@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Anonymization — Demo</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3;
+          --muted: #8b949e; --green: #3fb950; --red: #f85149; --blue: #58a6ff;
+          --yellow: #d29922; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: var(--bg); color: var(--text); min-height: 100vh; padding: 2rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+  .subtitle { color: var(--muted); margin-bottom: 2rem; font-size: 0.9rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; max-width: 1000px; margin: 0 auto; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; }
+  .card h2 { font-size: 1.1rem; margin-bottom: 1rem; color: var(--blue); }
+  .full { grid-column: 1 / -1; }
+
+  /* Upload */
+  .drop-zone { border: 2px dashed var(--border); border-radius: 8px; padding: 2rem;
+               text-align: center; cursor: pointer; transition: border-color 0.2s; }
+  .drop-zone:hover, .drop-zone.dragover { border-color: var(--blue); }
+  .drop-zone input { display: none; }
+  .drop-zone p { color: var(--muted); }
+
+  /* Audio players */
+  .player-row { display: flex; gap: 1rem; align-items: center; margin-bottom: 0.75rem; }
+  .player-row label { min-width: 90px; font-weight: 600; font-size: 0.85rem; color: var(--muted); }
+  audio { flex: 1; height: 36px; }
+
+  /* Metrics */
+  .metric { display: flex; justify-content: space-between; padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border); font-size: 0.95rem; }
+  .metric:last-child { border-bottom: none; }
+  .metric .val { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pass { color: var(--green); }
+  .fail { color: var(--red); }
+  .verdict { font-size: 1.3rem; font-weight: 800; text-align: center; padding: 1rem;
+             border-radius: 6px; margin-top: 1rem; }
+  .verdict.pass-bg { background: #0d2818; color: var(--green); }
+  .verdict.fail-bg { background: #2d1215; color: var(--red); }
+
+  /* Buttons */
+  button { background: var(--blue); color: #fff; border: none; border-radius: 6px;
+           padding: 0.6rem 1.2rem; cursor: pointer; font-size: 0.9rem; font-weight: 600;
+           transition: opacity 0.2s; }
+  button:hover { opacity: 0.85; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-green { background: var(--green); }
+  .btn-yellow { background: var(--yellow); color: #000; }
+  .btn-row { display: flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap; }
+
+  /* Status */
+  .status { padding: 0.5rem 0.75rem; border-radius: 4px; font-size: 0.85rem;
+            margin-top: 0.75rem; display: none; }
+  .status.info { display: block; background: #0d2137; color: var(--blue); }
+  .status.warn { display: block; background: #2d2200; color: var(--yellow); }
+  .status.err  { display: block; background: #2d1215; color: var(--red); }
+
+  /* History */
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+
+  @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<div style="max-width:1000px;margin:0 auto">
+  <h1>Voice Anonymization Demo</h1>
+  <p class="subtitle">Upload audio &rarr; anonymize &rarr; compare &rarr; send to Telegram</p>
+</div>
+
+<div class="grid">
+
+  <!-- Upload -->
+  <div class="card">
+    <h2>1. Upload Audio</h2>
+    <div class="drop-zone" id="dropZone">
+      <p>Drop a .wav / .ogg / .mp3 file here<br>or click to browse</p>
+      <input type="file" id="fileInput" accept="audio/*">
+    </div>
+    <div class="status" id="uploadStatus"></div>
+  </div>
+
+  <!-- Anonymize -->
+  <div class="card">
+    <h2>2. Anonymize</h2>
+    <p style="color:var(--muted);font-size:0.9rem;margin-bottom:1rem">
+      Runs the OHNN pipeline (or placeholder if not built yet).
+    </p>
+    <button id="btnAnonymize" disabled>Run Anonymization</button>
+    <div class="status" id="anonStatus"></div>
+  </div>
+
+  <!-- Players -->
+  <div class="card full">
+    <h2>3. Compare</h2>
+    <div class="player-row">
+      <label>Original</label>
+      <audio id="playerOriginal" controls></audio>
+    </div>
+    <div class="player-row">
+      <label>Anonymized</label>
+      <audio id="playerAnon" controls></audio>
+    </div>
+  </div>
+
+  <!-- Metrics -->
+  <div class="card">
+    <h2>4. Metrics</h2>
+    <button id="btnMetrics" disabled>Compute Metrics</button>
+    <div id="metricsPanel" style="margin-top:1rem">
+      <div class="metric"><span>MOS (naturalness)</span><span class="val" id="mMOS">—</span></div>
+      <div class="metric"><span>EER (anonymization)</span><span class="val" id="mEER">—</span></div>
+      <div class="metric"><span>Speaker Similarity</span><span class="val" id="mSIM">—</span></div>
+      <div class="metric"><span>WER (intelligibility)</span><span class="val" id="mWER">—</span></div>
+      <div class="verdict" id="verdict" style="display:none"></div>
+    </div>
+    <div class="status" id="metricsStatus"></div>
+  </div>
+
+  <!-- Actions -->
+  <div class="card">
+    <h2>5. Actions</h2>
+    <div class="btn-row">
+      <button id="btnNotify" class="btn-yellow" disabled>Send to Telegram</button>
+      <button id="btnReset" class="btn-green">Reset</button>
+    </div>
+    <div class="status" id="notifyStatus"></div>
+    <p style="color:var(--muted);font-size:0.8rem;margin-top:1rem">
+      Posts metrics to the group and mentions the owner for review.
+    </p>
+  </div>
+
+  <!-- History -->
+  <div class="card full">
+    <h2>Evaluation History</h2>
+    <table>
+      <thead><tr><th>#</th><th>Time</th><th>MOS</th><th>EER</th><th>Sim</th><th>WER</th><th>Verdict</th></tr></thead>
+      <tbody id="historyBody"><tr><td colspan="7" style="color:var(--muted)">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = { inputPath: null, outputPath: null, inputFilename: null, outputFilename: null, verdictText: null };
+
+// --- Upload ---
+const dropZone = $('dropZone'), fileInput = $('fileInput');
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); handleFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); });
+
+async function handleFile(file) {
+  setStatus('uploadStatus', 'info', 'Uploading…');
+  const fd = new FormData(); fd.append('audio', file);
+  try {
+    const r = await fetch('/api/upload', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (d.error) { setStatus('uploadStatus', 'err', d.error); return; }
+    state.inputPath = d.input_path;
+    state.inputFilename = d.filename;
+    $('playerOriginal').src = '/audio/uploads/' + d.filename;
+    setStatus('uploadStatus', 'info', 'Uploaded: ' + file.name);
+    $('btnAnonymize').disabled = false;
+  } catch (e) { setStatus('uploadStatus', 'err', e.message); }
+}
+
+// --- Anonymize ---
+$('btnAnonymize').addEventListener('click', async () => {
+  $('btnAnonymize').disabled = true;
+  setStatus('anonStatus', 'info', 'Running anonymization…');
+  try {
+    const r = await fetch('/api/anonymize', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ input_path: state.inputPath }),
+    });
+    const d = await r.json();
+    if (d.error) { setStatus('anonStatus', 'err', d.error); $('btnAnonymize').disabled = false; return; }
+    state.outputPath = d.output_path;
+    state.outputFilename = d.output_filename;
+    $('playerAnon').src = '/audio/anonymized/' + d.output_filename;
+    const label = d.pipeline_status === 'real' ? 'Pipeline: REAL' : 'Pipeline: PLACEHOLDER (copy of original)';
+    setStatus('anonStatus', d.pipeline_status === 'real' ? 'info' : 'warn', label);
+    $('btnMetrics').disabled = false;
+  } catch (e) { setStatus('anonStatus', 'err', e.message); $('btnAnonymize').disabled = false; }
+});
+
+// --- Metrics ---
+$('btnMetrics').addEventListener('click', async () => {
+  $('btnMetrics').disabled = true;
+  setStatus('metricsStatus', 'info', 'Computing metrics (may take a minute)…');
+  try {
+    const r = await fetch('/api/metrics', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ input_path: state.inputPath, output_path: state.outputPath }),
+    });
+    const d = await r.json();
+    if (d.error) { setStatus('metricsStatus', 'err', d.error); $('btnMetrics').disabled = false; return; }
+    const m = d.metrics;
+    setMetric('mMOS', m.mos, m.mos_pass);
+    setMetric('mEER', m.eer, m.eer_pass, '%');
+    setMetric('mSIM', m.speaker_similarity, m.speaker_sim_pass);
+    setMetric('mWER', m.wer, m.wer_pass, '%');
+    const v = $('verdict');
+    v.style.display = 'block';
+    v.textContent = m.verdict || 'FAIL';
+    v.className = 'verdict ' + ((m.verdict === 'PASS') ? 'pass-bg' : 'fail-bg');
+    state.verdictText = d.raw_stdout;
+    setStatus('metricsStatus', 'info', 'Done');
+    $('btnNotify').disabled = false;
+    loadHistory();
+  } catch (e) { setStatus('metricsStatus', 'err', e.message); $('btnMetrics').disabled = false; }
+});
+
+function setMetric(id, val, pass, suffix='') {
+  const el = $(id);
+  if (val == null) { el.textContent = '—'; el.className = 'val'; return; }
+  el.textContent = (typeof val === 'number' ? val.toFixed(val < 1 ? 3 : 1) : val) + suffix;
+  el.className = 'val ' + (pass ? 'pass' : 'fail');
+}
+
+// --- Notify ---
+$('btnNotify').addEventListener('click', async () => {
+  $('btnNotify').disabled = true;
+  setStatus('notifyStatus', 'info', 'Sending to Telegram…');
+  try {
+    const r = await fetch('/api/notify', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ verdict: state.verdictText || 'No metrics computed' }),
+    });
+    const d = await r.json();
+    setStatus('notifyStatus', d.ok ? 'info' : 'err', d.ok ? 'Sent to Telegram!' : (d.error || 'Failed'));
+  } catch (e) { setStatus('notifyStatus', 'err', e.message); }
+  $('btnNotify').disabled = false;
+});
+
+// --- Reset ---
+$('btnReset').addEventListener('click', () => {
+  state = { inputPath: null, outputPath: null, inputFilename: null, outputFilename: null, verdictText: null };
+  ['playerOriginal','playerAnon'].forEach(id => $(id).removeAttribute('src'));
+  ['mMOS','mEER','mSIM','mWER'].forEach(id => { $(id).textContent = '—'; $(id).className = 'val'; });
+  $('verdict').style.display = 'none';
+  ['uploadStatus','anonStatus','metricsStatus','notifyStatus'].forEach(id => { $(id).className = 'status'; });
+  $('btnAnonymize').disabled = true; $('btnMetrics').disabled = true; $('btnNotify').disabled = true;
+});
+
+// --- History ---
+async function loadHistory() {
+  try {
+    const r = await fetch('/api/history');
+    const data = await r.json();
+    const tb = $('historyBody');
+    if (!data.length) { tb.innerHTML = '<tr><td colspan="7" style="color:var(--muted)">No evaluations yet</td></tr>'; return; }
+    tb.innerHTML = data.reverse().map((e,i) => {
+      const pc = v => v ? 'pass' : 'fail';
+      return `<tr>
+        <td>${e.iteration ?? '—'}</td>
+        <td>${e.timestamp ? new Date(e.timestamp).toLocaleString() : '—'}</td>
+        <td class="${pc(e.mos_pass)}">${e.mos?.toFixed(2) ?? '—'}</td>
+        <td class="${pc(e.eer_pass)}">${e.eer?.toFixed(1) ?? '—'}%</td>
+        <td class="${pc(e.speaker_similarity_pass)}">${e.speaker_similarity?.toFixed(3) ?? '—'}</td>
+        <td class="${pc(e.wer_pass)}">${e.wer?.toFixed(1) ?? '—'}%</td>
+        <td class="${e.all_pass ? 'pass' : 'fail'}">${e.all_pass ? 'PASS' : 'FAIL'}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) { console.error(e); }
+}
+
+function setStatus(id, type, msg) { const el = $(id); el.className = 'status ' + type; el.textContent = msg; }
+
+loadHistory();
+</script>
+</body>
+</html>

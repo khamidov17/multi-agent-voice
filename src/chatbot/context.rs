@@ -77,19 +77,17 @@ impl ContextBuffer {
         let json = serde_json::to_string_pretty(&state)
             .map_err(|e| format!("Failed to serialize: {e}"))?;
 
-        std::fs::write(path, json)
-            .map_err(|e| format!("Failed to write: {e}"))?;
+        std::fs::write(path, json).map_err(|e| format!("Failed to write: {e}"))?;
 
         info!("💾 Saved context ({} messages)", self.messages.len());
         Ok(())
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
-        let json = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read: {e}"))?;
+        let json = std::fs::read_to_string(path).map_err(|e| format!("Failed to read: {e}"))?;
 
-        let state: ContextState = serde_json::from_str(&json)
-            .map_err(|e| format!("Failed to parse: {e}"))?;
+        let state: ContextState =
+            serde_json::from_str(&json).map_err(|e| format!("Failed to parse: {e}"))?;
 
         let mut buffer = Self {
             messages: state.messages,
@@ -97,7 +95,11 @@ impl ContextBuffer {
         };
         buffer.rebuild_index();
 
-        info!("Loaded context from {:?} ({} messages)", path, buffer.messages.len());
+        info!(
+            "Loaded context from {:?} ({} messages)",
+            path,
+            buffer.messages.len()
+        );
         Ok(buffer)
     }
 

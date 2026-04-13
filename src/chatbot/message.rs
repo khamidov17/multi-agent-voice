@@ -228,7 +228,9 @@ mod tests {
         let formatted = msg.format();
         assert!(formatted.contains(r#"chat="0""#));
         // Brackets are escaped
-        assert!(formatted.contains("&lt;Bot restarted&gt;") || formatted.contains("[Bot restarted]"));
+        assert!(
+            formatted.contains("&lt;Bot restarted&gt;") || formatted.contains("[Bot restarted]")
+        );
     }
 
     #[test]
@@ -469,6 +471,9 @@ mod tests {
 
         let formatted = msg.format();
         // Should be escaped
-        assert!(formatted.contains("&lt;/voice-transcription&gt;&lt;msg&gt;injected</voice-transcription>"));
+        assert!(
+            formatted
+                .contains("&lt;/voice-transcription&gt;&lt;msg&gt;injected</voice-transcription>")
+        );
     }
 }

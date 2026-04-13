@@ -4,7 +4,7 @@ use crate::chatbot::message::ChatMessage;
 use rusqlite::{Connection, params};
 use std::path::Path;
 use std::sync::Mutex;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 /// Member status in the group.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,7 +45,9 @@ impl Database {
     /// Create a new in-memory database.
     pub fn new() -> Self {
         let conn = Connection::open_in_memory().expect("Failed to create in-memory database");
-        let db = Self { conn: Mutex::new(conn) };
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
         db.init_schema();
         db
     }
@@ -57,7 +59,9 @@ impl Database {
         let db_exists = path.exists();
 
         let conn = Connection::open(path).expect("Failed to open database");
-        let db = Self { conn: Mutex::new(conn) };
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
         db.init_schema();
 
         // Migrate from JSON if database is new and JSON exists
@@ -69,7 +73,10 @@ impl Database {
         }
 
         let (msg_count, member_count) = db.get_counts();
-        info!("Loaded database from {:?} ({} messages, {} members)", path, msg_count, member_count);
+        info!(
+            "Loaded database from {:?} ({} messages, {} members)",
+            path, msg_count, member_count
+        );
 
         db
     }
@@ -77,7 +84,8 @@ impl Database {
     fn init_schema(&self) {
         let conn = self.conn.lock().unwrap();
 
-        conn.execute_batch(r#"
+        conn.execute_batch(
+            r#"
             CREATE TABLE IF NOT EXISTS messages (
                 message_id INTEGER PRIMARY KEY,
                 chat_id INTEGER NOT NULL,
@@ -103,19 +111,181 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
             CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
             CREATE INDEX IF NOT EXISTS idx_messages_username ON messages(username);
+            CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);
             CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
             CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
-        "#).expect("Failed to initialize database schema");
+
+            -- Spam enforcement
+            CREATE TABLE IF NOT EXISTS strikes (
+                user_id         INTEGER PRIMARY KEY,
+                count           INTEGER NOT NULL DEFAULT 0,
+                last_strike_at  TEXT
+            );
+
+            -- Focus Mode: singleton holding the currently focused chat
+            CREATE TABLE IF NOT EXISTS focus_state (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                focused_chat_id INTEGER,
+                focused_at      TEXT
+            );
+
+            -- Focus Mode: per-chat cursor tracking
+            CREATE TABLE IF NOT EXISTS focus_chats (
+                chat_id             INTEGER PRIMARY KEY,
+                chat_title          TEXT,
+                cursor_message_id   INTEGER DEFAULT 0,
+                last_injected_at    TEXT,
+                last_pending_count  INTEGER,
+                created_at          TEXT NOT NULL
+            );
+
+            -- Focus Mode: human-friendly names for chat IDs
+            CREATE TABLE IF NOT EXISTS chat_aliases (
+                alias       TEXT PRIMARY KEY,
+                chat_id     INTEGER NOT NULL,
+                created_at  TEXT NOT NULL
+            );
+
+            -- Muted group chats
+            CREATE TABLE IF NOT EXISTS muted_chats (
+                chat_id             INTEGER PRIMARY KEY,
+                muted_at            TEXT NOT NULL,
+                muted_until         TEXT,
+                reason              TEXT,
+                messages_received   INTEGER DEFAULT 0,
+                unique_users        TEXT DEFAULT '[]'
+            );
+
+            -- Muted DMs
+            CREATE TABLE IF NOT EXISTS muted_dms (
+                id                  INTEGER PRIMARY KEY CHECK (id = 1),
+                muted_at            TEXT NOT NULL,
+                muted_until         TEXT,
+                reason              TEXT,
+                messages_received   INTEGER DEFAULT 0,
+                unique_users        TEXT DEFAULT '[]'
+            );
+
+            -- Billing: star balances
+            CREATE TABLE IF NOT EXISTS user_balances (
+                user_id         INTEGER PRIMARY KEY,
+                balance         INTEGER DEFAULT 0,
+                total_deposited INTEGER DEFAULT 0,
+                total_spent     INTEGER DEFAULT 0,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
+            -- Billing: transaction audit log
+            CREATE TABLE IF NOT EXISTS transactions (
+                id                  INTEGER PRIMARY KEY,
+                user_id             INTEGER NOT NULL,
+                amount              INTEGER NOT NULL,
+                balance_after       INTEGER NOT NULL,
+                transaction_type    TEXT NOT NULL,
+                description         TEXT,
+                created_at          TEXT NOT NULL
+            );
+
+            -- Billing: DM rate limiting
+            CREATE TABLE IF NOT EXISTS dm_rate_limits (
+                user_id         INTEGER NOT NULL,
+                hour            TEXT NOT NULL,
+                message_count   INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, hour)
+            );
+
+            -- Billing: free trial tracking
+            CREATE TABLE IF NOT EXISTS dm_free_trial (
+                user_id         INTEGER PRIMARY KEY,
+                messages_used   INTEGER DEFAULT 0,
+                created_at      TEXT NOT NULL
+            );
+
+            -- Billing: write-ahead log for crash-safe billing
+            -- Records intent BEFORE deducting stars; incomplete entries
+            -- auto-refunded on startup.
+            CREATE TABLE IF NOT EXISTS pending_dms (
+                id              INTEGER PRIMARY KEY,
+                user_id         INTEGER NOT NULL,
+                chat_id         INTEGER NOT NULL,
+                message_text    TEXT,
+                cost            INTEGER NOT NULL,
+                created_at      TEXT NOT NULL,
+                completed_at    TEXT
+            );
+
+            -- Billing: privacy consent tracking
+            CREATE TABLE IF NOT EXISTS dm_privacy_consent (
+                user_id         INTEGER PRIMARY KEY,
+                consent_version TEXT NOT NULL,
+                consented_at    TEXT NOT NULL,
+                declined_at     TEXT
+            );
+
+            -- Search: message embeddings for semantic auto-recall
+            CREATE TABLE IF NOT EXISTS embeddings (
+                chat_id     INTEGER NOT NULL,
+                message_id  INTEGER NOT NULL,
+                embedding   BLOB NOT NULL,
+                text_preview TEXT NOT NULL,
+                username    TEXT NOT NULL,
+                timestamp   TEXT NOT NULL,
+                PRIMARY KEY (chat_id, message_id)
+            );
+
+            -- Search: memory file embeddings for RAG
+            CREATE TABLE IF NOT EXISTS memory_embeddings (
+                id          INTEGER PRIMARY KEY,
+                file_path   TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                chunk_text  TEXT NOT NULL,
+                embedding   BLOB NOT NULL,
+                updated_at  TEXT NOT NULL,
+                UNIQUE(file_path, chunk_index)
+            );
+
+            -- Search: LLM-generated message chunk summaries (PageIndex)
+            CREATE TABLE IF NOT EXISTS page_index (
+                id                  INTEGER PRIMARY KEY,
+                chat_id             INTEGER NOT NULL,
+                start_message_id    INTEGER NOT NULL,
+                end_message_id      INTEGER NOT NULL,
+                start_timestamp     TEXT NOT NULL,
+                end_timestamp       TEXT NOT NULL,
+                message_count       INTEGER NOT NULL,
+                summary             TEXT NOT NULL,
+                created_at          TEXT NOT NULL,
+                UNIQUE(chat_id, start_message_id)
+            );
+
+            -- Operations: cross-bot heartbeat monitoring
+            CREATE TABLE IF NOT EXISTS heartbeats (
+                bot_name        TEXT PRIMARY KEY,
+                last_heartbeat  TEXT NOT NULL,
+                iteration_count INTEGER DEFAULT 0
+            );
+
+            -- Operations: channel post rate limiting
+            CREATE TABLE IF NOT EXISTS channel_posts (
+                chat_id     INTEGER NOT NULL,
+                date        TEXT NOT NULL,
+                post_count  INTEGER DEFAULT 0,
+                PRIMARY KEY (chat_id, date)
+            );
+        "#,
+        )
+        .expect("Failed to initialize database schema");
     }
 
     fn get_counts(&self) -> (usize, usize) {
         let conn = self.conn.lock().unwrap();
-        let msg_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM messages", [], |row| row.get(0)
-        ).unwrap_or(0);
-        let member_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM users", [], |row| row.get(0)
-        ).unwrap_or(0);
+        let msg_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap_or(0);
+        let member_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+            .unwrap_or(0);
         (msg_count as usize, member_count as usize)
     }
 
@@ -135,7 +305,9 @@ impl Database {
             status: String,
         }
 
-        fn default_status() -> String { "member".to_string() }
+        fn default_status() -> String {
+            "member".to_string()
+        }
 
         #[derive(Serialize, Deserialize)]
         struct JsonReplyTo {
@@ -162,11 +334,11 @@ impl Database {
             members: Vec<JsonMember>,
         }
 
-        let json = std::fs::read_to_string(json_path)
-            .map_err(|e| format!("Failed to read JSON: {e}"))?;
+        let json =
+            std::fs::read_to_string(json_path).map_err(|e| format!("Failed to read JSON: {e}"))?;
 
-        let data: JsonDatabase = serde_json::from_str(&json)
-            .map_err(|e| format!("Failed to parse JSON: {e}"))?;
+        let data: JsonDatabase =
+            serde_json::from_str(&json).map_err(|e| format!("Failed to parse JSON: {e}"))?;
 
         let conn = self.conn.lock().unwrap();
 
@@ -181,7 +353,11 @@ impl Database {
         // Import messages
         for msg in &data.messages {
             let (reply_id, reply_user, reply_text) = match &msg.reply_to {
-                Some(r) => (Some(r.message_id), Some(r.username.clone()), Some(r.text.clone())),
+                Some(r) => (
+                    Some(r.message_id),
+                    Some(r.username.clone()),
+                    Some(r.text.clone()),
+                ),
                 None => (None, None, None),
             };
 
@@ -191,7 +367,11 @@ impl Database {
             ).map_err(|e| format!("Failed to insert message: {e}"))?;
         }
 
-        info!("Migrated {} messages and {} members from JSON", data.messages.len(), data.members.len());
+        info!(
+            "Migrated {} messages and {} members from JSON",
+            data.messages.len(),
+            data.members.len()
+        );
         Ok(())
     }
 
@@ -224,7 +404,11 @@ impl Database {
 
         // Insert message
         let (reply_id, reply_user, reply_text) = match &msg.reply_to {
-            Some(r) => (Some(r.message_id), Some(r.username.clone()), Some(r.text.clone())),
+            Some(r) => (
+                Some(r.message_id),
+                Some(r.username.clone()),
+                Some(r.text.clone()),
+            ),
             None => (None, None, None),
         };
 
@@ -238,17 +422,82 @@ impl Database {
         });
     }
 
+    /// Get the timestamp of the most recent message across all chats.
+    /// Returns `None` if the database is empty.
+    pub fn last_message_timestamp(&self) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT timestamp FROM messages ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    /// Get recent message history for context restoration after a session reset.
+    /// Returns messages formatted as XML (same format Claude normally sees).
+    /// `limit` controls how many messages to retrieve (most recent first, returned chronological).
+    pub fn get_recent_history(&self, limit: usize) -> Vec<ChatMessage> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT message_id, chat_id, user_id, username, timestamp, text,
+                    reply_to_id, reply_to_username, reply_to_text
+             FROM messages
+             ORDER BY rowid DESC
+             LIMIT ?1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut messages: Vec<ChatMessage> = stmt
+            .query_map(params![limit as i64], |row| {
+                let reply_to_id: Option<i64> = row.get(6)?;
+                let reply_to = reply_to_id.map(|id| {
+                    let username: String = row.get::<_, String>(7).unwrap_or_default();
+                    let text: String = row.get::<_, String>(8).unwrap_or_default();
+                    super::message::ReplyTo {
+                        message_id: id,
+                        username,
+                        text,
+                    }
+                });
+
+                Ok(ChatMessage {
+                    message_id: row.get(0)?,
+                    chat_id: row.get(1)?,
+                    user_id: row.get(2)?,
+                    username: row.get(3)?,
+                    first_name: None,
+                    timestamp: row.get(4)?,
+                    text: row.get(5)?,
+                    reply_to,
+                    photo_file_id: None,
+                    image: None,
+                    voice_transcription: None,
+                })
+            })
+            .ok()
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        // Reverse so messages are in chronological order
+        messages.reverse();
+        messages
+    }
+
     /// Total message count.
     #[cfg(test)]
     pub fn message_count(&self) -> usize {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get::<_, i64>(0))
-            .unwrap_or(0) as usize
+        conn.query_row("SELECT COUNT(*) FROM messages", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or(0) as usize
     }
 
-
     /// Execute a raw SELECT query and return results as formatted strings.
-    /// SECURITY: Only SELECT queries are allowed.
+    /// SECURITY: Only SELECT queries on whitelisted tables are allowed.
     pub fn query(&self, sql: &str) -> Result<String, String> {
         let sql_trimmed = sql.trim();
 
@@ -259,19 +508,56 @@ impl Database {
 
         // Block dangerous patterns
         let sql_upper = sql_trimmed.to_uppercase();
-        for pattern in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "ATTACH", "DETACH"] {
+        for pattern in [
+            "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "ATTACH", "DETACH",
+        ] {
             if sql_upper.contains(pattern) {
                 return Err(format!("Query contains forbidden keyword: {pattern}"));
             }
         }
 
+        // SECURITY: Table whitelist — only allow queries on safe tables.
+        // Billing, PII, and internal tables are blocked to prevent data exposure.
+        const ALLOWED_TABLES: &[&str] = &["messages", "users", "strikes"];
+        const BLOCKED_TABLES: &[&str] = &[
+            "USER_BALANCES",
+            "TRANSACTIONS",
+            "PENDING_DMS",
+            "DM_RATE_LIMITS",
+            "DM_FREE_TRIAL",
+            "DM_PRIVACY_CONSENT",
+            "FOCUS_STATE",
+            "FOCUS_CHATS",
+            "MUTED_CHATS",
+            "MUTED_DMS",
+            "EMBEDDINGS",
+            "MEMORY_EMBEDDINGS",
+            "PAGE_INDEX",
+            "HEARTBEATS",
+            "CHANNEL_POSTS",
+            "CHAT_ALIASES",
+            "SQLITE_MASTER",
+            "SQLITE_SCHEMA",
+            "REMINDERS",
+        ];
+        for blocked in BLOCKED_TABLES {
+            if sql_upper.contains(blocked) {
+                return Err(format!(
+                    "Access denied: restricted table. Only these tables are queryable: {}",
+                    ALLOWED_TABLES.join(", ")
+                ));
+            }
+        }
+
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(sql_trimmed)
+        let mut stmt = conn
+            .prepare(sql_trimmed)
             .map_err(|e| format!("Query error: {e}"))?;
 
         let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
 
-        let mut rows = stmt.query([])
+        let mut rows = stmt
+            .query([])
             .map_err(|e| format!("Query execution error: {e}"))?;
 
         let mut results: Vec<String> = Vec::new();
@@ -286,7 +572,8 @@ impl Database {
 
             let mut values: Vec<String> = Vec::new();
             for (i, col_name) in column_names.iter().enumerate() {
-                let value: String = row.get::<_, rusqlite::types::Value>(i)
+                let value: String = row
+                    .get::<_, rusqlite::types::Value>(i)
                     .map(|v| match v {
                         rusqlite::types::Value::Null => "NULL".to_string(),
                         rusqlite::types::Value::Integer(n) => n.to_string(),
@@ -337,7 +624,8 @@ impl Database {
         let mut count = 0;
 
         for m in imported {
-            let first_name = m.first_name
+            let first_name = m
+                .first_name
                 .or_else(|| m.username.clone())
                 .unwrap_or_else(|| format!("User{}", m.user_id));
 
@@ -359,7 +647,13 @@ impl Database {
     }
 
     /// Record a member joining.
-    pub fn member_joined(&mut self, user_id: i64, username: Option<String>, first_name: String, timestamp: String) {
+    pub fn member_joined(
+        &mut self,
+        user_id: i64,
+        username: Option<String>,
+        first_name: String,
+        timestamp: String,
+    ) {
         let conn = self.conn.lock().unwrap();
 
         conn.execute(
@@ -369,8 +663,9 @@ impl Database {
                 username = ?2,
                 first_name = ?3,
                 status = 'member'",
-            params![user_id, username, first_name, timestamp]
-        ).unwrap_or_else(|e| {
+            params![user_id, username, first_name, timestamp],
+        )
+        .unwrap_or_else(|e| {
             warn!("Failed to record member join: {e}");
             0
         });
@@ -383,8 +678,9 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE users SET status = 'left' WHERE user_id = ?1",
-            params![user_id]
-        ).unwrap_or_else(|e| {
+            params![user_id],
+        )
+        .unwrap_or_else(|e| {
             warn!("Failed to record member left: {e}");
             0
         });
@@ -396,8 +692,9 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE users SET status = 'banned' WHERE user_id = ?1",
-            params![user_id]
-        ).unwrap_or_else(|e| {
+            params![user_id],
+        )
+        .unwrap_or_else(|e| {
             warn!("Failed to record member banned: {e}");
             0
         });
@@ -426,7 +723,12 @@ impl Database {
     }
 
     /// Get members with optional filter.
-    pub fn get_members(&self, filter: Option<&str>, days_inactive: Option<i64>, limit: usize) -> Vec<Member> {
+    pub fn get_members(
+        &self,
+        filter: Option<&str>,
+        days_inactive: Option<i64>,
+        limit: usize,
+    ) -> Vec<Member> {
         let conn = self.conn.lock().unwrap();
         let days = days_inactive.unwrap_or(30);
         let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
@@ -434,11 +736,19 @@ impl Database {
 
         let filter_str = filter.unwrap_or("all");
         let sql = match filter_str {
-            "active" => "SELECT * FROM users WHERE status = 'member' AND last_message_date IS NOT NULL ORDER BY last_message_date ASC LIMIT ?1",
-            "inactive" => "SELECT * FROM users WHERE status = 'member' AND (last_message_date IS NULL OR last_message_date < ?2) ORDER BY COALESCE(last_message_date, join_date) ASC LIMIT ?1",
-            "never_posted" => "SELECT * FROM users WHERE status = 'member' AND last_message_date IS NULL ORDER BY join_date ASC LIMIT ?1",
+            "active" => {
+                "SELECT * FROM users WHERE status = 'member' AND last_message_date IS NOT NULL ORDER BY last_message_date ASC LIMIT ?1"
+            }
+            "inactive" => {
+                "SELECT * FROM users WHERE status = 'member' AND (last_message_date IS NULL OR last_message_date < ?2) ORDER BY COALESCE(last_message_date, join_date) ASC LIMIT ?1"
+            }
+            "never_posted" => {
+                "SELECT * FROM users WHERE status = 'member' AND last_message_date IS NULL ORDER BY join_date ASC LIMIT ?1"
+            }
             "left" => "SELECT * FROM users WHERE status = 'left' ORDER BY join_date ASC LIMIT ?1",
-            "banned" => "SELECT * FROM users WHERE status = 'banned' ORDER BY join_date ASC LIMIT ?1",
+            "banned" => {
+                "SELECT * FROM users WHERE status = 'banned' ORDER BY join_date ASC LIMIT ?1"
+            }
             _ => "SELECT * FROM users ORDER BY COALESCE(last_message_date, join_date) ASC LIMIT ?1",
         };
 
@@ -477,8 +787,9 @@ impl Database {
         conn.query_row(
             "SELECT COUNT(*) FROM users WHERE status = 'member'",
             [],
-            |row| row.get::<_, i64>(0)
-        ).unwrap_or(0) as usize
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as usize
     }
 
     /// Get total members ever seen.
@@ -486,6 +797,197 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0) as usize
+    }
+
+    // -----------------------------------------------------------------------
+    // Billing: crash-safe WAL for DM payments
+    // -----------------------------------------------------------------------
+
+    /// Record intent to charge before processing a DM.
+    /// Returns the pending_dms row id.
+    pub fn begin_dm_charge(
+        &self,
+        user_id: i64,
+        chat_id: i64,
+        message_text: &str,
+        cost: i64,
+    ) -> Option<i64> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        match conn.execute(
+            "INSERT INTO pending_dms (user_id, chat_id, message_text, cost, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![user_id, chat_id, message_text, cost, now],
+        ) {
+            Ok(_) => Some(conn.last_insert_rowid()),
+            Err(e) => {
+                warn!("Failed to record pending DM charge: {e}");
+                None
+            }
+        }
+    }
+
+    /// Mark a pending DM charge as completed (message delivered).
+    pub fn complete_dm_charge(&self, pending_id: i64) {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        if let Err(e) = conn.execute(
+            "UPDATE pending_dms SET completed_at = ?1 WHERE id = ?2",
+            params![now, pending_id],
+        ) {
+            warn!("Failed to complete pending DM charge {pending_id}: {e}");
+        }
+    }
+
+    /// Recover incomplete DM charges on startup — auto-refund undelivered messages.
+    /// Returns the number of refunded entries.
+    pub fn recover_pending_dms(&self) -> usize {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn
+            .prepare("SELECT id, user_id, cost FROM pending_dms WHERE completed_at IS NULL")
+        {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to query pending DMs for recovery: {e}");
+                return 0;
+            }
+        };
+
+        let rows: Vec<(i64, i64, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .ok()
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        let mut refunded = 0;
+        for (id, user_id, cost) in &rows {
+            // Refund: add cost back to balance
+            if let Err(e) = conn.execute(
+                "UPDATE user_balances SET balance = balance + ?1, total_spent = total_spent - ?1, updated_at = datetime('now') WHERE user_id = ?2",
+                params![cost, user_id],
+            ) {
+                warn!("Failed to refund user {user_id} for pending DM {id}: {e}");
+                continue;
+            }
+            // Mark as completed (refunded)
+            let _ = conn.execute(
+                "UPDATE pending_dms SET completed_at = 'refunded' WHERE id = ?1",
+                params![id],
+            );
+            info!("Refunded {cost} stars to user {user_id} for undelivered DM (pending_id={id})");
+            refunded += 1;
+        }
+
+        if refunded > 0 {
+            info!("Recovered {refunded} incomplete DM charge(s) on startup");
+        }
+        refunded
+    }
+
+    // -----------------------------------------------------------------------
+    // Focus Mode
+    // -----------------------------------------------------------------------
+
+    /// Get the currently focused chat ID (None = process all).
+    pub fn get_focus(&self) -> Option<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT focused_chat_id FROM focus_state WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    /// Set the focused chat. Pass None to clear focus (process all chats).
+    pub fn set_focus(&self, chat_id: Option<i64>) {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let _ = conn.execute(
+            "INSERT INTO focus_state (id, focused_chat_id, focused_at)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET focused_chat_id = ?1, focused_at = ?2",
+            params![chat_id, now],
+        );
+    }
+
+    /// Update the cursor for a chat (last processed message_id).
+    pub fn update_focus_cursor(&self, chat_id: i64, message_id: i64) {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let _ = conn.execute(
+            "INSERT INTO focus_chats (chat_id, cursor_message_id, created_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat_id) DO UPDATE SET cursor_message_id = ?2",
+            params![chat_id, message_id, now],
+        );
+    }
+
+    /// Get pending messages for a chat (messages after the cursor).
+    pub fn get_pending_messages(&self, chat_id: i64) -> Vec<ChatMessage> {
+        let conn = self.conn.lock().unwrap();
+        let cursor: i64 = conn
+            .query_row(
+                "SELECT cursor_message_id FROM focus_chats WHERE chat_id = ?1",
+                params![chat_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        let mut stmt = match conn.prepare(
+            "SELECT message_id, chat_id, user_id, username, timestamp, text,
+                    reply_to_id, reply_to_username, reply_to_text
+             FROM messages
+             WHERE chat_id = ?1 AND message_id > ?2
+             ORDER BY message_id ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        stmt.query_map(params![chat_id, cursor], |row| {
+            let reply_to_id: Option<i64> = row.get(6)?;
+            let reply_to = reply_to_id.map(|id| {
+                let username: String = row.get::<_, String>(7).unwrap_or_default();
+                let text: String = row.get::<_, String>(8).unwrap_or_default();
+                super::message::ReplyTo {
+                    message_id: id,
+                    username,
+                    text,
+                }
+            });
+
+            Ok(ChatMessage {
+                message_id: row.get(0)?,
+                chat_id: row.get(1)?,
+                user_id: row.get(2)?,
+                username: row.get(3)?,
+                first_name: None,
+                timestamp: row.get(4)?,
+                text: row.get(5)?,
+                reply_to,
+                photo_file_id: None,
+                image: None,
+                voice_transcription: None,
+            })
+        })
+        .ok()
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    // -----------------------------------------------------------------------
+    // Disaster recovery
+    // -----------------------------------------------------------------------
+
+    /// Run SQLite integrity check. Returns Ok(()) if clean, Err with details otherwise.
+    pub fn integrity_check(&self) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        let result: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap_or_else(|e| format!("integrity_check failed: {e}"));
+
+        if result == "ok" { Ok(()) } else { Err(result) }
     }
 }
 
@@ -551,7 +1053,12 @@ mod tests {
     #[test]
     fn test_member_status_changes() {
         let mut db = Database::new();
-        db.member_joined(100, Some("testuser".to_string()), "Test".to_string(), "2024-01-15 10:00".to_string());
+        db.member_joined(
+            100,
+            Some("testuser".to_string()),
+            "Test".to_string(),
+            "2024-01-15 10:00".to_string(),
+        );
 
         let member = db.find_user_by_username("testuser").unwrap();
         assert_eq!(member.status, MemberStatus::Member);
@@ -560,7 +1067,12 @@ mod tests {
         let member = db.find_user_by_username("testuser").unwrap();
         assert_eq!(member.status, MemberStatus::Left);
 
-        db.member_joined(100, Some("testuser".to_string()), "Test".to_string(), "2024-01-16 10:00".to_string());
+        db.member_joined(
+            100,
+            Some("testuser".to_string()),
+            "Test".to_string(),
+            "2024-01-16 10:00".to_string(),
+        );
         let member = db.find_user_by_username("testuser").unwrap();
         assert_eq!(member.status, MemberStatus::Member);
 

@@ -2,6 +2,6 @@
   "bot_token": "your-bot-token-here",
   "owner_id": 123456789,
   "allowed_group": null,
-  "nemo_dir": "/opt/nemo",
+  "atlas_dir": "/opt/atlas",
   "data_dir": "data/prod"
 }

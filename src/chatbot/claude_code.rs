@@ -6,11 +6,15 @@
 //!
 //! SECURITY: Uses `--tools "WebSearch"` to allow only read-only web search.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Sentinel model value Claude CLI uses when the session is corrupted/overflowed.
+/// Security model value Claude CLI uses when the session is corrupted/overflowed.
 const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 use serde::{Deserialize, Serialize};
@@ -19,10 +23,56 @@ use tracing::{debug, error, info, warn};
 
 use super::tools::ToolCall;
 
-/// JSON schema for structured output - tool_calls array.
+/// RAII guard for Claude Code child process (claudir architecture).
+/// Ensures wait() is always called on the child process, preventing zombies.
+#[allow(dead_code)]
+struct ChildGuard {
+    child: Option<Child>,
+    pid: u32,
+}
+
+#[allow(dead_code)]
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        let pid = child.id();
+        Self {
+            child: Some(child),
+            pid,
+        }
+    }
+
+    fn take(&mut self) -> Option<Child> {
+        self.child.take()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            info!("ChildGuard: killing PID {}", self.pid);
+            let _ = child.kill();
+            let _ = child.wait(); // Prevent zombie process
+        }
+    }
+}
+
+/// JSON schema for structured output - control actions + tool_calls.
 const TOOL_CALLS_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["stop", "sleep", "heartbeat"],
+      "description": "Control action: stop (done processing, MUST include reason), sleep (pause then check for new messages), heartbeat (still working)"
+    },
+    "reason": {
+      "type": "string",
+      "description": "Required when action=stop. Explain WHY you are stopping (e.g. 'responded to Atlas task assignment'). Forces you to think about whether stopping is appropriate."
+    },
+    "sleep_ms": {
+      "type": "integer",
+      "description": "When action=sleep, how long to pause in milliseconds (max 300000 = 5 min). Use this to wait for a teammate to respond before checking back."
+    },
     "tool_calls": {
       "type": "array",
       "items": {
@@ -60,7 +110,7 @@ const TOOL_CALLS_SCHEMA: &str = r#"{
       }
     }
   },
-  "required": ["tool_calls"]
+  "required": ["action"]
 }"#;
 
 /// Tool call with ID for tracking.
@@ -87,12 +137,33 @@ pub struct Response {
     pub tool_calls: Vec<ToolCallWithId>,
     /// True if context compaction occurred during this response.
     pub compacted: bool,
+    /// Control action from structured output: "stop", "sleep", or "heartbeat"
+    pub action: String,
+    /// Reason for stopping (required by claudir architecture)
+    pub reason: Option<String>,
+    /// Sleep duration in ms (when action = "sleep")
+    pub sleep_ms: Option<u64>,
+    /// Dropped text detected in result field — Claude wrote text instead of calling send_message.
+    /// The worker injects a correction back to Claude on the next turn.
+    pub dropped_text: Option<String>,
 }
 
 /// Claude Code client - maintains persistent subprocess.
 pub struct ClaudeCode {
     tx: mpsc::Sender<WorkerMessage>,
     rx: mpsc::Receiver<Response>,
+    /// Inject channel — send text directly to Claude's stdin mid-turn.
+    /// Wrapped in Arc<Mutex<>> so it survives subprocess restarts.
+    inject_tx: Arc<Mutex<std::sync::mpsc::Sender<String>>>,
+    /// PID of the currently running Claude Code subprocess (Feature 4).
+    #[allow(dead_code)]
+    pid: Arc<AtomicU32>,
+    /// Millisecond timestamp of the last JSON line received from stdout (Feature 4).
+    #[allow(dead_code)]
+    heartbeat: Arc<AtomicU64>,
+    /// Unix-millisecond timestamp until which the worker should sleep due to quota (Feature 5).
+    #[allow(dead_code)]
+    quota_reset_at: Arc<AtomicU64>,
 }
 
 enum WorkerMessage {
@@ -104,23 +175,126 @@ enum WorkerMessage {
     Reset,
 }
 
+/// Shared atomics passed from ClaudeCode to the worker thread (Features 4 & 5).
+struct WorkerAtomics {
+    /// PID of the currently running Claude Code subprocess (Feature 4).
+    pid: Arc<AtomicU32>,
+    /// Millisecond timestamp of the last JSON line received from stdout (Feature 4).
+    heartbeat: Arc<AtomicU64>,
+    /// Unix-millisecond timestamp until which the worker should sleep due to quota (Feature 5).
+    quota_reset_at: Arc<AtomicU64>,
+}
+
+/// Static configuration for the worker thread (reduces argument count).
+struct WorkerConfig {
+    system_prompt: String,
+    resume_session: Option<String>,
+    session_file: Option<PathBuf>,
+    full_permissions: bool,
+    tools_override: Option<String>,
+}
+
 impl ClaudeCode {
     /// Start Claude Code, optionally resuming a previous session.
     /// If session_file exists, resume that session. Otherwise start fresh with system_prompt.
-    pub fn start(system_prompt: String, session_file: Option<PathBuf>) -> Result<Self, String> {
+    /// `full_permissions` — Tier 1 gets Bash,Edit,Write,Read,WebSearch; Tier 2 gets WebSearch only.
+    /// `tools_override` — if set, overrides the full_permissions-based tool selection.
+    pub fn start(
+        system_prompt: String,
+        session_file: Option<PathBuf>,
+        full_permissions: bool,
+        tools_override: Option<String>,
+    ) -> Result<Self, String> {
         let (msg_tx, msg_rx) = mpsc::channel::<WorkerMessage>(32);
         let (resp_tx, resp_rx) = mpsc::channel::<Response>(32);
+
+        // Inject channel: std::sync::mpsc because the worker is a std thread.
+        // The sender is wrapped in Arc<Mutex<>> so the engine can swap it on restart.
+        let (inject_tx_raw, inject_rx) = std::sync::mpsc::channel::<String>();
+        let inject_tx = Arc::new(Mutex::new(inject_tx_raw));
+
+        // Features 4 & 5: shared atomics for PID, heartbeat, and quota tracking.
+        let pid = Arc::new(AtomicU32::new(0));
+        let heartbeat = Arc::new(AtomicU64::new(0));
+        let quota_reset_at = Arc::new(AtomicU64::new(0));
+
+        let atomics_worker = WorkerAtomics {
+            pid: pid.clone(),
+            heartbeat: heartbeat.clone(),
+            quota_reset_at: quota_reset_at.clone(),
+        };
 
         // Check for existing session
         let resume_session = session_file.as_ref().and_then(|p| load_session_id(p));
 
+        let config = WorkerConfig {
+            system_prompt,
+            resume_session,
+            session_file,
+            full_permissions,
+            tools_override,
+        };
+
         std::thread::spawn(move || {
-            if let Err(e) = worker_loop(system_prompt, resume_session, session_file, msg_rx, resp_tx) {
+            if let Err(e) = worker_loop(config, msg_rx, resp_tx, inject_rx, atomics_worker) {
                 error!("Claude Code worker died: {}", e);
             }
         });
 
-        Ok(Self { tx: msg_tx, rx: resp_rx })
+        Ok(Self {
+            tx: msg_tx,
+            rx: resp_rx,
+            inject_tx,
+            pid,
+            heartbeat,
+            quota_reset_at,
+        })
+    }
+
+    /// Return the PID of the currently running Claude Code subprocess (Feature 4).
+    #[allow(dead_code)]
+    pub fn pid(&self) -> u32 {
+        self.pid.load(Ordering::SeqCst)
+    }
+
+    /// Return the Unix-millisecond timestamp of the last heartbeat from Claude (Feature 4).
+    #[allow(dead_code)]
+    pub fn last_heartbeat(&self) -> u64 {
+        self.heartbeat.load(Ordering::SeqCst)
+    }
+
+    /// Return a cloned `Arc` to the PID atomic so callers can observe it without
+    /// holding the `ClaudeCode` mutex (used by the health monitor).
+    pub fn pid_handle(&self) -> Arc<AtomicU32> {
+        self.pid.clone()
+    }
+
+    /// Return a cloned `Arc` to the heartbeat atomic so callers can observe it
+    /// without holding the `ClaudeCode` mutex (used by the health monitor).
+    pub fn heartbeat_handle(&self) -> Arc<AtomicU64> {
+        self.heartbeat.clone()
+    }
+
+    /// Inject a message directly into Claude's stdin mid-turn.
+    /// The message is delivered without waiting for the current turn to finish.
+    #[allow(dead_code)]
+    pub fn inject_message(&self, text: &str) {
+        match self.inject_tx.lock() {
+            Ok(tx) => {
+                if tx.send(text.to_string()).is_err() {
+                    warn!("inject_message: inject channel closed (worker may have died)");
+                }
+            }
+            Err(e) => {
+                error!("inject_message: failed to lock inject_tx: {}", e);
+            }
+        }
+    }
+
+    /// Return a clone of the inject sender handle so callers can inject without
+    /// holding the ClaudeCode mutex (needed during active processing turns).
+    pub fn inject_handle(&self) -> Arc<Mutex<std::sync::mpsc::Sender<String>>> {
+        self.inject_tx.clone()
     }
 
     /// Send a user message and get response.
@@ -137,7 +311,10 @@ impl ClaudeCode {
     }
 
     /// Send tool results and get next response.
-    pub async fn send_tool_results(&mut self, results: Vec<ToolResult>) -> Result<Response, String> {
+    pub async fn send_tool_results(
+        &mut self,
+        results: Vec<ToolResult>,
+    ) -> Result<Response, String> {
         self.tx
             .send(WorkerMessage::ToolResults(results))
             .await
@@ -157,7 +334,10 @@ impl ClaudeCode {
             .await
             .map_err(|_| "Worker channel closed")?;
         // Wait for the synthetic Done that confirms the reset completed
-        self.rx.recv().await.ok_or_else(|| "Response channel closed".to_string())?;
+        self.rx
+            .recv()
+            .await
+            .ok_or_else(|| "Response channel closed".to_string())?;
         Ok(())
     }
 
@@ -240,6 +420,10 @@ enum OutputMessage {
         structured_output: Option<StructuredOutput>,
         #[serde(default)]
         session_id: Option<String>,
+        /// Direct text output from Claude (dropped text detection).
+        /// If this is non-empty, Claude wrote text instead of calling send_message.
+        #[serde(default)]
+        result: Option<String>,
     },
     #[serde(other)]
     Other,
@@ -274,7 +458,22 @@ struct SystemMessage {
 
 #[derive(Debug, Deserialize)]
 struct StructuredOutput {
+    /// Control action: "stop", "sleep", or "heartbeat"
+    #[serde(default = "default_action")]
+    action: String,
+    /// Required when action=stop: justification for stopping
+    #[serde(default)]
+    reason: Option<String>,
+    /// When action=sleep: how long to pause (ms, max 300000)
+    #[serde(default)]
+    sleep_ms: Option<u64>,
+    /// Tool calls to execute before the action takes effect
+    #[serde(default)]
     tool_calls: Vec<RawToolCall>,
+}
+
+fn default_action() -> String {
+    "stop".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -459,6 +658,12 @@ impl RawToolCall {
                 "fetch_url" => Ok(ToolCall::FetchUrl {
                     url: self.url.clone().ok_or("fetch_url requires url")?,
                 }),
+                "send_file" => Ok(ToolCall::SendFile {
+                    chat_id: self.chat_id.ok_or("send_file requires chat_id")?,
+                    file_path: self.file_path.clone().or_else(|| self.path.clone()).ok_or("send_file requires file_path")?,
+                    caption: self.caption.clone(),
+                    reply_to_message_id: self.reply_to_message_id,
+                }),
                 "send_music" => Ok(ToolCall::SendMusic {
                     chat_id: self.chat_id.ok_or("send_music requires chat_id")?,
                     prompt: self.prompt.clone().ok_or("send_music requires prompt")?,
@@ -540,27 +745,93 @@ fn save_session_id(path: &Path, session_id: &str) {
 }
 
 /// Set up a fresh Claude Code process, send the init message, and wait until ready.
-/// Returns (process, stdin, out_rx). Updates `session_id` in place.
+/// Returns (process, stdin, out_rx, stderr_buf). Updates `session_id` in place.
+/// `stderr_buf` is Feature 3: last 10 stderr lines for crash diagnostics.
+#[allow(clippy::type_complexity)]
 fn setup_claude_process(
     system_prompt: &str,
     resume_session: Option<&str>,
     session_file: &Option<PathBuf>,
     session_id: &mut Option<String>,
-) -> Result<(Child, ChildStdin, mpsc::Receiver<OutputMessage>), String> {
-    let mut process = spawn_process(resume_session)?;
+    full_permissions: bool,
+    tools_override: &Option<String>,
+    atomics: &WorkerAtomics,
+) -> Result<
+    (
+        Child,
+        ChildStdin,
+        std::sync::mpsc::Receiver<OutputMessage>,
+        Arc<Mutex<VecDeque<String>>>,
+    ),
+    String,
+> {
+    let mut process = spawn_process(
+        system_prompt,
+        resume_session,
+        full_permissions,
+        tools_override,
+    )?;
     let mut stdin = process.stdin.take().ok_or("No stdin")?;
     let stdout = process.stdout.take().ok_or("No stdout")?;
     let stderr = process.stderr.take();
 
-    info!("🚀 Claude Code started (PID {})", process.id());
+    // Feature 4: update PID atomic with the new process PID.
+    let new_pid = process.id();
+    atomics.pid.store(new_pid, Ordering::SeqCst);
+    info!("Claude Code started (PID {})", new_pid);
 
-    // Stderr reader thread — logs errors from Claude CLI
+    // Feature 3: circular stderr buffer — last 10 lines shared with worker for crash diagnostics.
+    let stderr_buf: Arc<Mutex<VecDeque<String>>> =
+        Arc::new(Mutex::new(VecDeque::with_capacity(10)));
+
+    // Stderr reader thread — logs errors from Claude CLI, fills buffer, detects quota (Feature 5).
     if let Some(stderr) = stderr {
+        let stderr_buf_clone = stderr_buf.clone();
+        let quota_reset_at_clone = atomics.quota_reset_at.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
                 match line {
-                    Ok(l) if !l.is_empty() => error!("Claude CLI stderr: {}", l),
+                    Ok(l) if !l.is_empty() => {
+                        error!("Claude CLI stderr: {}", l);
+
+                        // Feature 3: maintain circular buffer of last 10 lines.
+                        if let Ok(mut buf) = stderr_buf_clone.lock() {
+                            if buf.len() == 10 {
+                                buf.pop_front();
+                            }
+                            buf.push_back(l.clone());
+                        }
+
+                        // Feature 5: detect API quota / rate-limit messages in stderr.
+                        let lower = l.to_lowercase();
+                        let is_quota = lower.contains("rate limit")
+                            || lower.contains("rate_limit")
+                            || lower.contains("quota")
+                            || lower.contains("exceeded")
+                            || lower.contains("retry after")
+                            || lower.contains("reset");
+                        if is_quota {
+                            warn!("Quota/rate-limit detected in stderr: {}", l);
+                            // Default: sleep for 60 seconds.  Try to parse a number of seconds
+                            // from the line (e.g. "retry after 30s" or "reset in 45").
+                            let sleep_secs: u64 = l
+                                .split_whitespace()
+                                .filter_map(|w| w.trim_end_matches('s').parse::<u64>().ok())
+                                .find(|&n| n > 0 && n < 3600)
+                                .unwrap_or(60);
+                            let now_ms = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let reset_at = now_ms + sleep_secs * 1000;
+                            quota_reset_at_clone.store(reset_at, Ordering::SeqCst);
+                            info!(
+                                "Quota: worker will pause for {}s (reset_at={})",
+                                sleep_secs, reset_at
+                            );
+                        }
+                    }
                     Err(e) => {
                         warn!("Stderr read error: {}", e);
                         break;
@@ -571,9 +842,11 @@ fn setup_claude_process(
         });
     }
 
-    let (out_tx, mut out_rx) = mpsc::channel::<OutputMessage>(100);
+    // Use std::sync::mpsc so wait_for_result can use recv_timeout for inject polling.
+    let (out_tx, mut out_rx) = std::sync::mpsc::channel::<OutputMessage>();
 
-    // Stdout reader thread
+    // Stdout reader thread — Feature 4: update heartbeat on every JSON line.
+    let heartbeat_clone = atomics.heartbeat.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
@@ -589,9 +862,16 @@ fn setup_claude_process(
             let preview: String = line.chars().take(120).collect();
             info!("Claude stdout: {}", preview);
 
+            // Feature 4: update heartbeat timestamp on every parsed JSON line.
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            heartbeat_clone.store(now_ms, Ordering::SeqCst);
+
             match serde_json::from_str::<OutputMessage>(&line) {
                 Ok(msg) => {
-                    if out_tx.blocking_send(msg).is_err() {
+                    if out_tx.send(msg).is_err() {
                         break;
                     }
                 }
@@ -612,10 +892,30 @@ fn setup_claude_process(
 
     // Wait for system message (comes first in output)
     loop {
-        match out_rx.blocking_recv() {
-            Some(OutputMessage::System(sys)) if sys.subtype.is_none() || sys.subtype.as_deref() == Some("init") => {
-                let allowed = ["StructuredOutput", "WebSearch"];
-                let unexpected: Vec<_> = sys.tools.iter().filter(|t| !allowed.contains(&t.as_str())).collect();
+        match out_rx.recv().ok() {
+            Some(OutputMessage::System(sys))
+                if sys.subtype.is_none() || sys.subtype.as_deref() == Some("init") =>
+            {
+                // Build the allowed tools list based on config
+                let mut allowed_set: Vec<&str> = vec!["StructuredOutput"];
+                if let Some(ov) = tools_override {
+                    // Custom tools: parse comma-separated list
+                    for tool in ov.split(',') {
+                        let t = tool.trim();
+                        if !t.is_empty() && !allowed_set.contains(&t) {
+                            allowed_set.push(Box::leak(t.to_string().into_boxed_str()));
+                        }
+                    }
+                } else if full_permissions {
+                    allowed_set.extend_from_slice(&["WebSearch", "Bash", "Read", "Edit", "Write"]);
+                } else {
+                    allowed_set.push("WebSearch");
+                }
+                let unexpected: Vec<_> = sys
+                    .tools
+                    .iter()
+                    .filter(|t| !allowed_set.contains(&t.as_str()))
+                    .collect();
                 if !unexpected.is_empty() {
                     error!("SECURITY: Unexpected tools: {:?}", unexpected);
                     return Err("Security violation".to_string());
@@ -624,7 +924,7 @@ fn setup_claude_process(
                     info!("Got session ID: {}", sid);
                     *session_id = Some(sid);
                 }
-                info!("🤖 Claude Code session ready");
+                info!("Claude Code session ready");
                 break;
             }
             Some(_) => continue,
@@ -632,8 +932,8 @@ fn setup_claude_process(
         }
     }
 
-    // Wait for result of first message (ignore synthetic flag — if init fails, bigger problem)
-    let (_, new_sid, _) = wait_for_result(&mut out_rx)?;
+    // Wait for result of first message (no inject needed during init).
+    let (_, new_sid, _) = wait_for_result(&mut out_rx, None)?;
     if let Some(sid) = new_sid {
         *session_id = Some(sid);
     }
@@ -644,41 +944,87 @@ fn setup_claude_process(
         save_session_id(path, sid);
     }
 
-    Ok((process, stdin, out_rx))
+    Ok((process, stdin, out_rx, stderr_buf))
 }
 
 fn worker_loop(
-    system_prompt: String,
-    resume_session: Option<String>,
-    session_file: Option<PathBuf>,
+    cfg: WorkerConfig,
     mut msg_rx: mpsc::Receiver<WorkerMessage>,
     resp_tx: mpsc::Sender<Response>,
+    inject_rx: std::sync::mpsc::Receiver<String>,
+    atomics: WorkerAtomics,
 ) -> Result<(), String> {
     let mut session_id: Option<String> = None;
-    let (mut process, mut stdin, mut out_rx) =
-        setup_claude_process(&system_prompt, resume_session.as_deref(), &session_file, &mut session_id)?;
+    let (process, mut stdin, mut out_rx, mut _stderr_buf) = setup_claude_process(
+        &cfg.system_prompt,
+        cfg.resume_session.as_deref(),
+        &cfg.session_file,
+        &mut session_id,
+        cfg.full_permissions,
+        &cfg.tools_override,
+        &atomics,
+    )?;
+
+    // Feature 1: wrap the process in a ChildGuard for RAII cleanup.
+    let mut guard = ChildGuard::new(process);
 
     // Main loop
     while let Some(msg) = msg_rx.blocking_recv() {
+        // Feature 5: check quota before processing each message.
+        {
+            let reset_at = atomics.quota_reset_at.load(Ordering::SeqCst);
+            if reset_at > 0 {
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                if now_ms < reset_at {
+                    let sleep_ms = reset_at - now_ms;
+                    warn!(
+                        "Quota active — sleeping {}ms before processing next message",
+                        sleep_ms
+                    );
+                    std::thread::sleep(Duration::from_millis(sleep_ms));
+                }
+                // Clear the quota timer once we have passed the reset point.
+                atomics.quota_reset_at.store(0, Ordering::SeqCst);
+            }
+        }
+
         // Handle Reset before interacting with Claude subprocess
         if matches!(msg, WorkerMessage::Reset) {
-            info!("🔄 Resetting Claude session (timeout recovery)");
+            info!("Resetting Claude session (timeout recovery)");
+
+            // Feature 1: take child from guard to kill it, then create new guard below.
             drop(stdin);
-            let _ = process.kill();
-            let _ = process.wait();
-            if let Some(ref path) = session_file {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+
+            if let Some(ref path) = cfg.session_file {
                 match std::fs::remove_file(path) {
                     Ok(()) => info!("Deleted session file for reset"),
                     Err(e) => warn!("Could not delete session file: {e}"),
                 }
             }
             session_id = None;
-            match setup_claude_process(&system_prompt, None, &session_file, &mut session_id) {
-                Ok((new_proc, new_stdin, new_out_rx)) => {
-                    process = new_proc;
+            match setup_claude_process(
+                &cfg.system_prompt,
+                None,
+                &cfg.session_file,
+                &mut session_id,
+                cfg.full_permissions,
+                &cfg.tools_override,
+                &atomics,
+            ) {
+                Ok((new_proc, new_stdin, new_out_rx, new_stderr_buf)) => {
+                    // Feature 1: wrap new process in a fresh ChildGuard.
+                    guard = ChildGuard::new(new_proc);
                     stdin = new_stdin;
                     out_rx = new_out_rx;
-                    info!("✅ Claude session reset after timeout");
+                    _stderr_buf = new_stderr_buf;
+                    info!("Claude session reset after timeout");
                 }
                 Err(e) => {
                     error!("Failed to reset Claude after timeout: {e}");
@@ -691,6 +1037,10 @@ fn worker_loop(
                     call: ToolCall::Done,
                 }],
                 compacted: false,
+                action: "stop".to_string(),
+                reason: Some("session reset".to_string()),
+                sleep_ms: None,
+                dropped_text: None,
             };
             if resp_tx.blocking_send(reset_response).is_err() {
                 break;
@@ -712,24 +1062,39 @@ fn worker_loop(
             WorkerMessage::Reset => unreachable!("handled above"),
         }
 
-        let (response, new_sid, is_synthetic) = wait_for_result(&mut out_rx)?;
+        let (response, new_sid, is_synthetic) =
+            wait_for_result(&mut out_rx, Some((&inject_rx, &mut stdin)))?;
 
         // Update session ID if changed
         if let Some(sid) = new_sid
             && session_id.as_ref() != Some(&sid)
         {
             session_id = Some(sid.clone());
-            if let Some(ref path) = session_file {
+            if let Some(ref path) = cfg.session_file {
                 save_session_id(path, &sid);
+            }
+        }
+
+        // Feature 2: if Claude dropped text instead of calling send_message, inject a correction
+        // on the next turn so Claude learns to use the tool instead.
+        if let Some(ref dropped) = response.dropped_text {
+            let correction = format!(
+                "[SYSTEM] You output the following text directly instead of calling send_message:\n\
+                \"{}\"\n\
+                Always use the send_message tool to communicate. Plain text output is dropped.",
+                dropped.chars().take(300).collect::<String>()
+            );
+            if let Err(e) = send_message(&mut stdin, &correction) {
+                warn!("Failed to inject dropped-text correction: {}", e);
             }
         }
 
         // Circuit breaker: synthetic error = session overflow → auto-reset
         if is_synthetic {
-            warn!("🔄 Synthetic error detected — auto-resetting Claude session");
+            warn!("Synthetic error detected — auto-resetting Claude session");
 
             // Delete the corrupt session file so we start fresh
-            if let Some(ref path) = session_file {
+            if let Some(ref path) = cfg.session_file {
                 match std::fs::remove_file(path) {
                     Ok(()) => info!("Deleted corrupt session file"),
                     Err(e) => warn!("Could not delete session file: {}", e),
@@ -737,19 +1102,42 @@ fn worker_loop(
             }
             session_id = None;
 
-            // Kill old process (drop stdin first to close the pipe cleanly)
+            // Feature 1: take from guard, kill, then create a new guard below.
+            // Drop stdin first to close the pipe cleanly.
             drop(stdin);
-            let _ = process.kill();
-            let _ = process.wait();
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
             // out_rx will be reassigned below; the old reader thread exits naturally when its out_tx is dropped
 
+            // Feature 3: log last stderr lines on crash for diagnostics.
+            if let Ok(buf) = _stderr_buf.lock()
+                && !buf.is_empty()
+            {
+                error!("Last {} stderr line(s) before synthetic reset:", buf.len());
+                for line in buf.iter() {
+                    error!("  stderr: {}", line);
+                }
+            }
+
             // Spawn a fresh process with no resume
-            match setup_claude_process(&system_prompt, None, &session_file, &mut session_id) {
-                Ok((new_proc, new_stdin, new_out_rx)) => {
-                    process = new_proc;
+            match setup_claude_process(
+                &cfg.system_prompt,
+                None,
+                &cfg.session_file,
+                &mut session_id,
+                cfg.full_permissions,
+                &cfg.tools_override,
+                &atomics,
+            ) {
+                Ok((new_proc, new_stdin, new_out_rx, new_stderr_buf)) => {
+                    // Feature 1: wrap new process in ChildGuard.
+                    guard = ChildGuard::new(new_proc);
                     stdin = new_stdin;
                     out_rx = new_out_rx;
-                    info!("✅ Claude session reset successfully");
+                    _stderr_buf = new_stderr_buf;
+                    info!("Claude session reset successfully");
                 }
                 Err(e) => {
                     error!("Failed to reset Claude session: {}", e);
@@ -765,6 +1153,10 @@ fn worker_loop(
                     call: ToolCall::Done,
                 }],
                 compacted: false,
+                action: "stop".to_string(),
+                reason: Some("circuit breaker reset".to_string()),
+                sleep_ms: None,
+                dropped_text: None,
             };
             if resp_tx.blocking_send(reset_response).is_err() {
                 break;
@@ -778,28 +1170,63 @@ fn worker_loop(
     }
 
     info!("Claude Code worker shutting down");
+    // Feature 1: drop stdin first to close the pipe, then let guard Drop kill/wait the process.
     drop(stdin);
-    let _ = process.wait();
+    drop(guard);
     Ok(())
 }
 
-fn spawn_process(resume_session: Option<&str>) -> Result<Child, String> {
-    let schema: serde_json::Value = serde_json::from_str(TOOL_CALLS_SCHEMA)
-        .map_err(|e| format!("Bad schema: {}", e))?;
-    let schema_str = serde_json::to_string(&schema)
-        .map_err(|e| format!("Failed to serialize schema: {}", e))?;
+fn spawn_process(
+    system_prompt: &str,
+    resume_session: Option<&str>,
+    full_permissions: bool,
+    tools_override: &Option<String>,
+) -> Result<Child, String> {
+    let schema: serde_json::Value =
+        serde_json::from_str(TOOL_CALLS_SCHEMA).map_err(|e| format!("Bad schema: {}", e))?;
+    let schema_str =
+        serde_json::to_string(&schema).map_err(|e| format!("Failed to serialize schema: {}", e))?;
+
+    // SECURITY: Tool selection by tier, with optional override.
+    // Tier 1 (full_permissions=true): Bash,Edit,Write,Read,WebSearch
+    // Tier 2 (full_permissions=false): WebSearch only
+    // Custom: tools_override (e.g. "Bash,Read,WebSearch" for Sentinel eval)
+    let tools_string;
+    let tools: &str = if let Some(override_tools) = tools_override {
+        tools_string = override_tools.clone();
+        &tools_string
+    } else if full_permissions {
+        "Bash,Edit,Write,Read,WebSearch"
+    } else {
+        "WebSearch"
+    };
+    info!(
+        "Claude Code tools: {} (full_permissions={}, override={:?})",
+        tools, full_permissions, tools_override
+    );
 
     let mut cmd = Command::new("claude");
     cmd.args([
         "--print",
-        "--input-format", "stream-json",
-        "--output-format", "stream-json",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
         "--verbose",
-        "--model", "sonnet",
-        "--tools", "WebSearch",  // SECURITY: only allow read-only web search
-        // WebSearch auto-approved via .claude/settings.local.json on the server
-        "--json-schema", &schema_str,
+        "--model",
+        "sonnet",
+        "--system-prompt",
+        system_prompt,
+        "--tools",
+        tools,
+        "--json-schema",
+        &schema_str,
     ]);
+
+    // Tier 1: skip permission prompts so Nova can work outside the project directory
+    if full_permissions {
+        cmd.arg("--dangerously-skip-permissions");
+    }
 
     // Add --resume if we have a session to resume
     if let Some(session_id) = resume_session {
@@ -820,12 +1247,19 @@ fn send_message(stdin: &mut ChildStdin, content: &str) -> Result<(), String> {
     send_content(stdin, MessageContent::Text(content.to_string()))
 }
 
-fn send_message_with_image(stdin: &mut ChildStdin, text: &str, image_data: &[u8], media_type: &str) -> Result<(), String> {
+fn send_message_with_image(
+    stdin: &mut ChildStdin,
+    text: &str,
+    image_data: &[u8],
+    media_type: &str,
+) -> Result<(), String> {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(image_data);
 
     let content = MessageContent::MultiPart(vec![
-        ContentPart::Text { text: text.to_string() },
+        ContentPart::Text {
+            text: text.to_string(),
+        },
         ContentPart::Image {
             source: ImageSource {
                 source_type: "base64".to_string(),
@@ -848,8 +1282,12 @@ fn send_content(stdin: &mut ChildStdin, content: MessageContent) -> Result<(), S
     };
 
     let json = serde_json::to_string(&msg).map_err(|e| format!("Serialize: {}", e))?;
-    stdin.write_all(json.as_bytes()).map_err(|e| format!("Write: {}", e))?;
-    stdin.write_all(b"\n").map_err(|e| format!("Write newline: {}", e))?;
+    stdin
+        .write_all(json.as_bytes())
+        .map_err(|e| format!("Write: {}", e))?;
+    stdin
+        .write_all(b"\n")
+        .map_err(|e| format!("Write newline: {}", e))?;
     stdin.flush().map_err(|e| format!("Flush: {}", e))?;
 
     let len = match &msg.message.content {
@@ -862,13 +1300,55 @@ fn send_content(stdin: &mut ChildStdin, content: MessageContent) -> Result<(), S
 
 /// Wait for result. Returns (Response, Option<session_id>, is_synthetic).
 /// `is_synthetic` is true when the session overflowed and the response is invalid.
-fn wait_for_result(out_rx: &mut mpsc::Receiver<OutputMessage>) -> Result<(Response, Option<String>, bool), String> {
+/// When `inject` is provided, checks it every second for mid-turn messages and
+/// writes them directly to Claude's stdin.
+fn wait_for_result(
+    out_rx: &mut std::sync::mpsc::Receiver<OutputMessage>,
+    mut inject: Option<(&std::sync::mpsc::Receiver<String>, &mut ChildStdin)>,
+) -> Result<(Response, Option<String>, bool), String> {
     let mut compacted = false;
     let mut is_synthetic = false;
+    // Feature 2: capture dropped text for the caller to act on.
+    let mut dropped_text: Option<String> = None;
 
     loop {
-        match out_rx.blocking_recv() {
-            Some(OutputMessage::Assistant { message }) => {
+        // When an inject channel is available, poll with a 1-second timeout so we can
+        // forward mid-turn messages from the engine to Claude's stdin without blocking.
+        let msg_opt = if inject.is_some() {
+            // Try to receive with a short timeout to keep the loop responsive.
+            // We re-borrow inject inside the match below to avoid borrow conflicts.
+            match out_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(msg) => Some(msg),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("Output channel closed".to_string());
+                }
+            }
+        } else {
+            match out_rx.recv() {
+                Ok(msg) => Some(msg),
+                Err(_) => return Err("Output channel closed".to_string()),
+            }
+        };
+
+        // On timeout: check inject channel and continue waiting.
+        let msg = match msg_opt {
+            None => {
+                if let Some((inject_rx, stdin)) = inject.as_mut() {
+                    while let Ok(text) = inject_rx.try_recv() {
+                        info!("Mid-turn inject: {} chars", text.len());
+                        if let Err(e) = send_message(stdin, &text) {
+                            warn!("Failed to write inject to Claude stdin: {}", e);
+                        }
+                    }
+                }
+                continue;
+            }
+            Some(m) => m,
+        };
+
+        match msg {
+            OutputMessage::Assistant { message } => {
                 if let Some(msg) = message {
                     // Synthetic model = session overflow signal
                     if msg.model.as_deref() == Some(SYNTHETIC_MODEL) {
@@ -884,45 +1364,87 @@ fn wait_for_result(out_rx: &mut mpsc::Receiver<OutputMessage>) -> Result<(Respon
                     }
                 }
             }
-            Some(OutputMessage::System(sys)) => {
+            OutputMessage::System(sys) => {
                 // Detect new-style compaction via system subtype:compact_boundary
                 if sys.subtype.as_deref() == Some("compact_boundary") {
                     warn!("Context compaction detected (compact_boundary)!");
                     compacted = true;
                 }
             }
-            Some(OutputMessage::Result { total_cost_usd, is_error, structured_output, session_id }) => {
+            OutputMessage::Result {
+                total_cost_usd,
+                is_error,
+                structured_output,
+                session_id,
+                result: result_text,
+            } => {
+                // DROPPED TEXT DETECTION (claudir architecture):
+                // If Claude output text directly instead of calling send_message,
+                // log it and store it so the worker can inject a correction next turn.
+                if let Some(ref text) = result_text {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() && trimmed.len() > 5 {
+                        warn!(
+                            "DROPPED TEXT detected ({} chars): \"{}\"",
+                            trimmed.len(),
+                            trimmed.chars().take(100).collect::<String>()
+                        );
+                        // Feature 2: store for re-injection as a correction message.
+                        dropped_text = Some(trimmed.to_string());
+                    }
+                }
                 if is_error {
                     warn!("Claude returned is_error:true — session error, treating as synthetic");
                     is_synthetic = true;
                 }
 
-                info!("🤖 Response (cost: ${:.4}{})", total_cost_usd, if is_synthetic { ", SYNTHETIC" } else { "" });
+                info!(
+                    "🤖 Response (cost: ${:.4}{})",
+                    total_cost_usd,
+                    if is_synthetic { ", SYNTHETIC" } else { "" }
+                );
 
-                let tool_calls = match structured_output {
+                let (tool_calls, action, reason, sleep_ms) = match structured_output {
                     Some(so) => {
-                        so.tool_calls
+                        let calls = so
+                            .tool_calls
                             .iter()
                             .enumerate()
                             .map(|(i, tc)| ToolCallWithId {
                                 id: format!("tool_{}", i),
                                 call: tc.to_tool_call(),
                             })
-                            .collect()
+                            .collect();
+                        (calls, so.action, so.reason, so.sleep_ms)
                     }
                     None => {
                         if !is_synthetic {
                             warn!("No structured output");
                         }
-                        Vec::new()
+                        (Vec::new(), "stop".to_string(), None, None)
                     }
                 };
 
-                info!("Got {} tool call(s){}", tool_calls.len(), if compacted { " (after compaction)" } else { "" });
-                return Ok((Response { tool_calls, compacted }, session_id, is_synthetic));
+                info!(
+                    "Got {} tool call(s), action={}{}",
+                    tool_calls.len(),
+                    action,
+                    if compacted { " (compacted)" } else { "" }
+                );
+                return Ok((
+                    Response {
+                        tool_calls,
+                        compacted,
+                        action,
+                        reason,
+                        sleep_ms,
+                        dropped_text,
+                    },
+                    session_id,
+                    is_synthetic,
+                ));
             }
-            Some(OutputMessage::Other) => continue,
-            None => return Err("Output channel closed".to_string()),
+            OutputMessage::Other => continue,
         }
     }
 }

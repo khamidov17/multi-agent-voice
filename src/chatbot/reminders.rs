@@ -51,7 +51,9 @@ impl ReminderStore {
         )
         .map_err(|e| format!("Create reminders table: {e}"))?;
 
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     /// Schedule a new reminder. Returns the new reminder ID.
@@ -90,7 +92,9 @@ impl ReminderStore {
             "SELECT id, chat_id, message, trigger_at, repeat_cron
              FROM reminders WHERE active = 1 ORDER BY trigger_at"
         };
-        let mut stmt = conn.prepare(sql).map_err(|e| format!("Prepare list: {e}"))?;
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| format!("Prepare list: {e}"))?;
         let dummy = chat_id.unwrap_or(0);
         let rows = stmt
             .query_map(params![dummy], |row| {
@@ -214,7 +218,11 @@ fn next_from_cron(expr: &str) -> Option<DateTime<Utc>> {
         let today = now.date_naive().and_hms_opt(h, m, 0)?;
         let today_utc: DateTime<Utc> = DateTime::from_naive_utc_and_offset(today, Utc);
         // If that time already passed today, schedule for tomorrow
-        let next = if today_utc > now { today_utc } else { today_utc + Duration::days(1) };
+        let next = if today_utc > now {
+            today_utc
+        } else {
+            today_utc + Duration::days(1)
+        };
         return Some(next);
     }
 
@@ -232,7 +240,9 @@ pub fn parse_trigger_at(s: &str) -> Result<DateTime<Utc>, String> {
     // Relative
     if let Some(rest) = s.strip_prefix('+') {
         let (num_str, unit) = rest.split_at(rest.len().saturating_sub(1));
-        let n: i64 = num_str.parse().map_err(|_| format!("Invalid number in '{s}'"))?;
+        let n: i64 = num_str
+            .parse()
+            .map_err(|_| format!("Invalid number in '{s}'"))?;
         return Ok(match unit {
             "m" => Utc::now() + Duration::minutes(n),
             "h" => Utc::now() + Duration::hours(n),
@@ -257,7 +267,9 @@ pub fn parse_trigger_at(s: &str) -> Result<DateTime<Utc>, String> {
         return Ok(DateTime::from_naive_utc_and_offset(naive, Utc));
     }
 
-    Err(format!("Cannot parse '{s}'. Use '+30m', '+2h', '+1d', or 'YYYY-MM-DD HH:MM'"))
+    Err(format!(
+        "Cannot parse '{s}'. Use '+30m', '+2h', '+1d', or 'YYYY-MM-DD HH:MM'"
+    ))
 }
 
 /// Spawn the background reminder loop. Checks every 60 seconds and fires due reminders.

@@ -23,6 +23,7 @@ tracing-appender = "0.2"
 base64 = "0.22.1"
 whisper-rs = "0.15"
 rusqlite = { version = "0.33", features = ["bundled"] }
+anyhow = "1"
 calamine = "0.26"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 axum = "0.7"

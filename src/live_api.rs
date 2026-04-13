@@ -52,7 +52,11 @@ async fn live_config(
     Json(payload): Json<LiveConfigRequest>,
 ) -> Response {
     if state.gemini_api_key.is_empty() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "Gemini API key not configured").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Gemini API key not configured",
+        )
+            .into_response();
     }
 
     let user_id = match validate_init_data(&payload.init_data, &state.bot_token) {

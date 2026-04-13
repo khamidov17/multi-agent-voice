@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>Nemo Live</title>
+  <title>Atlas Live</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -49,7 +49,7 @@
     .orb.connecting    { background: #1a1a2e; animation: pulse-blue 1.5s infinite; }
     .orb.listening     { background: #0d2b0d; animation: pulse-green 2s infinite; }
     .orb.you-speaking  { background: #1a2b00; animation: pulse-lime 0.6s infinite; }
-    .orb.nemo-speaking { background: #001a2b; animation: pulse-cyan 0.8s infinite; }
+    .orb.atlas-speaking { background: #001a2b; animation: pulse-cyan 0.8s infinite; }
     .orb.error         { background: #2b0000; }
     .orb.disconnected  { background: #1a1a1a; opacity: 0.5; }
 
@@ -85,7 +85,7 @@
 
     .msg { margin-bottom: 6px; }
     .msg.you  { color: #aaccff; }
-    .msg.nemo { color: #aaffcc; }
+    .msg.atlas { color: #aaffcc; }
 
     .timeout-bar-wrap {
       height: 3px;
@@ -116,7 +116,7 @@
 </head>
 <body>
   <div class="container">
-    <h1>🤖 Nemo Live</h1>
+    <h1>🤖 Atlas Live</h1>
     <div class="orb-wrap">
       <div class="orb connecting" id="orb">🤖</div>
     </div>
@@ -142,7 +142,7 @@
     // ── State ─────────────────────────────────────────────────────────────────
     let ws           = null;
     let audioCtx     = null;   // 16kHz — mic input
-    let playCtx      = null;   // 24kHz — Nemo audio output
+    let playCtx      = null;   // 24kHz — Atlas audio output
     let mediaStream  = null;
     let processor    = null;
     let geminiApiKey = null;
@@ -159,15 +159,15 @@
     // ── UI helpers ────────────────────────────────────────────────────────────
     function setState(state, msg) {
       currentState = state;
-      const icons = { connecting:'🤖', listening:'🎤', 'you-speaking':'🗣️', 'nemo-speaking':'🔊', error:'❌', disconnected:'💤' };
-      const labels= { connecting:'Connecting...', listening:'Listening...', 'you-speaking':"You're speaking...", 'nemo-speaking':'Nemo is speaking...', disconnected:'Disconnected' };
+      const icons = { connecting:'🤖', listening:'🎤', 'you-speaking':'🗣️', 'atlas-speaking':'🔊', error:'❌', disconnected:'💤' };
+      const labels= { connecting:'Connecting...', listening:'Listening...', 'you-speaking':"You're speaking...", 'atlas-speaking':'Atlas is speaking...', disconnected:'Disconnected' };
 
       orbEl.className = 'orb ' + state;
       orbEl.textContent = icons[state] || '🤖';
       statusEl.textContent = msg || labels[state] || '';
       statusEl.className = state === 'error' ? 'error' : (state !== 'connecting' && state !== 'disconnected' ? 'active' : '');
 
-      const live = state === 'listening' || state === 'you-speaking' || state === 'nemo-speaking';
+      const live = state === 'listening' || state === 'you-speaking' || state === 'atlas-speaking';
       if (live) {
         actionBtn.textContent = 'Disconnect';
         actionBtn.className = 'visible danger';
@@ -185,7 +185,7 @@
       transcriptEl.classList.add('visible');
       const div = document.createElement('div');
       div.className = 'msg ' + who;
-      div.textContent = (who === 'you' ? 'You: ' : 'Nemo: ') + text;
+      div.textContent = (who === 'you' ? 'You: ' : 'Atlas: ') + text;
       transcriptEl.appendChild(div);
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
     }
@@ -259,7 +259,7 @@
               },
               realtimeInputConfig: { automaticActivityDetection: {} },
               systemInstruction: {
-                parts: [{ text: `You are Nemo, a friendly AI assistant made by Avazbek. CRITICAL RULE: Every single turn, detect the EXACT language the user just spoke and respond ONLY in that language — even if they switch languages mid-conversation. Russian turn → reply in Russian. Uzbek turn → reply in Uzbek. English turn → reply in English. NEVER mix languages. Switch IMMEDIATELY when the language changes. Keep replies concise and natural like a voice conversation.` }]
+                parts: [{ text: `You are Atlas, a friendly AI assistant made by Avazbek. CRITICAL RULE: Every single turn, detect the EXACT language the user just spoke and respond ONLY in that language — even if they switch languages mid-conversation. Russian turn → reply in Russian. Uzbek turn → reply in Uzbek. English turn → reply in English. NEVER mix languages. Switch IMMEDIATELY when the language changes. Keep replies concise and natural like a voice conversation.` }]
               }
             }
           }));
@@ -282,20 +282,20 @@
           const userText = data.serverContent?.inputTranscription?.text;
           if (userText) { addTranscript('you', userText); touchActivity(); }
 
-          // Nemo audio + text
+          // Atlas audio + text
           const parts = data.serverContent?.modelTurn?.parts || [];
           for (const part of parts) {
             if (part.inlineData?.mimeType?.startsWith('audio/pcm')) {
               queuePCM(part.inlineData.data);
-              if (currentState !== 'nemo-speaking') setState('nemo-speaking');
+              if (currentState !== 'atlas-speaking') setState('atlas-speaking');
               touchActivity();
             }
-            if (part.text) addTranscript('nemo', part.text);
+            if (part.text) addTranscript('atlas', part.text);
           }
 
           if (data.serverContent?.turnComplete) {
             touchActivity();
-            if (currentState === 'nemo-speaking' && audioQueue.length === 0 && !isPlaying) {
+            if (currentState === 'atlas-speaking' && audioQueue.length === 0 && !isPlaying) {
               setState('listening');
             }
           }
@@ -385,7 +385,7 @@
     function playNext() {
       if (audioQueue.length === 0) {
         isPlaying = false;
-        if (currentState === 'nemo-speaking') setState('listening');
+        if (currentState === 'atlas-speaking') setState('listening');
         return;
       }
       isPlaying = true;
@@ -397,7 +397,7 @@
       const float32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
 
-      // Dedicated 24kHz playback context for Nemo's voice output
+      // Dedicated 24kHz playback context for Atlas's voice output
       if (!playCtx) playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000, latencyHint: 'interactive' });
       if (playCtx.state === 'suspended') playCtx.resume();
       const buffer = playCtx.createBuffer(1, float32.length, 24000);

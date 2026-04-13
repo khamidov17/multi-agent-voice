@@ -113,7 +113,10 @@ fn parse_timestamp(date: &str) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 || args.len() > 4 {
-        eprintln!("Usage: {} <telegram_export.json> <messages.json> [chat_id]", args[0]);
+        eprintln!(
+            "Usage: {} <telegram_export.json> <messages.json> [chat_id]",
+            args[0]
+        );
         eprintln!();
         eprintln!("Import Telegram Desktop export into the message store.");
         eprintln!("Only imports group messages (not DMs).");
@@ -121,7 +124,9 @@ fn main() {
         eprintln!("Arguments:");
         eprintln!("  telegram_export.json  Path to Telegram export (result.json)");
         eprintln!("  messages.json         Path to output message store");
-        eprintln!("  chat_id               Optional: specific chat_id to use (e.g., -1001234567890)");
+        eprintln!(
+            "  chat_id               Optional: specific chat_id to use (e.g., -1001234567890)"
+        );
         eprintln!();
         eprintln!("To export from Telegram Desktop:");
         eprintln!("  1. Open Settings → Advanced → Export Telegram Data");
@@ -137,10 +142,9 @@ fn main() {
 
     // Read Telegram export
     println!("Reading Telegram export from {:?}...", export_path);
-    let export_json = std::fs::read_to_string(export_path)
-        .expect("Failed to read export file");
-    let export: TelegramExport = serde_json::from_str(&export_json)
-        .expect("Failed to parse Telegram export JSON");
+    let export_json = std::fs::read_to_string(export_path).expect("Failed to read export file");
+    let export: TelegramExport =
+        serde_json::from_str(&export_json).expect("Failed to parse Telegram export JSON");
 
     println!("Chat: {} (id: {})", export.name, export.id);
     println!("Chat type: {}", export.chat_type);
@@ -175,7 +179,8 @@ fn main() {
     };
 
     // Build a map for reply lookups
-    let msg_map: HashMap<i64, &TelegramMessage> = export.messages
+    let msg_map: HashMap<i64, &TelegramMessage> = export
+        .messages
         .iter()
         .filter(|m| m.msg_type == "message")
         .map(|m| (m.id, m))
@@ -198,7 +203,8 @@ fn main() {
             continue; // Skip empty messages (media, etc.)
         }
 
-        let user_id = msg.from_id
+        let user_id = msg
+            .from_id
             .as_ref()
             .map(|id| parse_user_id(id))
             .unwrap_or(0);
@@ -208,12 +214,13 @@ fn main() {
 
         // Build reply_to if present
         let reply_to = msg.reply_to_message_id.and_then(|reply_id| {
-            msg_map.get(&reply_id).map(|reply_msg| {
-                ReplyTo {
-                    message_id: reply_id,
-                    username: reply_msg.from.clone().unwrap_or_else(|| "unknown".to_string()),
-                    text: reply_msg.text.to_string().chars().take(100).collect(),
-                }
+            msg_map.get(&reply_id).map(|reply_msg| ReplyTo {
+                message_id: reply_id,
+                username: reply_msg
+                    .from
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                text: reply_msg.text.to_string().chars().take(100).collect(),
             })
         });
 
@@ -228,16 +235,23 @@ fn main() {
         });
     }
 
-    println!("Converted {} messages ({} skipped)", imported.len(), skipped);
+    println!(
+        "Converted {} messages ({} skipped)",
+        imported.len(),
+        skipped
+    );
 
     // Load existing store or create new
     let mut existing: HashMap<i64, ChatMessage> = if store_path.exists() {
         println!("Loading existing message store from {:?}...", store_path);
-        let json = std::fs::read_to_string(store_path)
-            .expect("Failed to read existing store");
-        let store: MessageStore = serde_json::from_str(&json)
-            .expect("Failed to parse existing store");
-        store.messages.into_iter().map(|m| (m.message_id, m)).collect()
+        let json = std::fs::read_to_string(store_path).expect("Failed to read existing store");
+        let store: MessageStore =
+            serde_json::from_str(&json).expect("Failed to parse existing store");
+        store
+            .messages
+            .into_iter()
+            .map(|m| (m.message_id, m))
+            .collect()
     } else {
         HashMap::new()
     };
@@ -262,11 +276,11 @@ fn main() {
     println!("Total messages after merge: {}", all_messages.len());
 
     // Save
-    let store = MessageStore { messages: all_messages };
-    let json = serde_json::to_string_pretty(&store)
-        .expect("Failed to serialize");
-    std::fs::write(store_path, json)
-        .expect("Failed to write store");
+    let store = MessageStore {
+        messages: all_messages,
+    };
+    let json = serde_json::to_string_pretty(&store).expect("Failed to serialize");
+    std::fs::write(store_path, json).expect("Failed to write store");
 
     println!("Saved to {:?}", store_path);
 }

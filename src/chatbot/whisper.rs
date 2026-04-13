@@ -99,7 +99,7 @@ fn convert_ogg_to_pcm(ogg_data: &[u8]) -> Result<Vec<f32>, String> {
             "s16le", // 16-bit signed little-endian PCM
             "-acodec",
             "pcm_s16le",
-            "-y",  // Overwrite
+            "-y",     // Overwrite
             "pipe:1", // Output to stdout
         ])
         .stdin(std::process::Stdio::null())
@@ -159,8 +159,16 @@ impl OpenAITranscriber {
     }
 
     /// Transcribe OGG Opus audio. Auto-detects language (English, Russian, Uzbek).
-    pub async fn transcribe(&self, ogg_data: &[u8], audio_duration_secs: u32) -> Result<String, String> {
-        debug!("OpenAI STT: {} bytes, {}s", ogg_data.len(), audio_duration_secs);
+    pub async fn transcribe(
+        &self,
+        ogg_data: &[u8],
+        audio_duration_secs: u32,
+    ) -> Result<String, String> {
+        debug!(
+            "OpenAI STT: {} bytes, {}s",
+            ogg_data.len(),
+            audio_duration_secs
+        );
         use reqwest::multipart;
 
         let audio_part = multipart::Part::bytes(ogg_data.to_vec())
@@ -172,7 +180,10 @@ impl OpenAITranscriber {
         let form = multipart::Form::new()
             .text("model", "gpt-4o-transcribe")
             .text("response_format", "json")
-            .text("prompt", "The audio is a voice message in English, Russian, or Uzbek.")
+            .text(
+                "prompt",
+                "The audio is a voice message in English, Russian, or Uzbek.",
+            )
             .part("file", audio_part);
 
         let resp = self
@@ -199,15 +210,19 @@ impl OpenAITranscriber {
             text: String,
         }
 
-        let parsed: OpenAIJsonResponse =
-            serde_json::from_str(&body).map_err(|e| format!("Parse error: {e} (body: {})", truncate(&body, 200)))?;
+        let parsed: OpenAIJsonResponse = serde_json::from_str(&body)
+            .map_err(|e| format!("Parse error: {e} (body: {})", truncate(&body, 200)))?;
 
         let text = parsed.text.trim().to_string();
         if text.is_empty() {
             return Ok("Voice message not understood, please type instead".to_string());
         }
 
-        info!("OpenAI STT ({}s): \"{}\"", audio_duration_secs, truncate(&text, 100));
+        info!(
+            "OpenAI STT ({}s): \"{}\"",
+            audio_duration_secs,
+            truncate(&text, 100)
+        );
         Ok(text)
     }
 }
@@ -235,8 +250,16 @@ impl GroqTranscriber {
     /// - If Kazakh (kk) detected → retry with language=uz (Uzbek often misidentified as Kazakh).
     /// - If text is short (<3 words) and audio is ≥3s → retry with language=uz (hallucination catch).
     /// - If final result is empty → return "Voice message not understood" hint.
-    pub async fn transcribe(&self, ogg_data: &[u8], audio_duration_secs: u32) -> Result<String, String> {
-        debug!("Groq STT: {} bytes, {}s", ogg_data.len(), audio_duration_secs);
+    pub async fn transcribe(
+        &self,
+        ogg_data: &[u8],
+        audio_duration_secs: u32,
+    ) -> Result<String, String> {
+        debug!(
+            "Groq STT: {} bytes, {}s",
+            ogg_data.len(),
+            audio_duration_secs
+        );
 
         // Pass 1: auto-detect
         let (text, lang) = self.transcribe_internal(ogg_data, None).await?;
@@ -249,7 +272,10 @@ impl GroqTranscriber {
             if detected == "kk" {
                 info!("Groq detected Kazakh (kk), retrying with Uzbek (uz)");
             } else {
-                info!("Groq: {} words for {}s audio, retrying with uz", word_count, audio_duration_secs);
+                info!(
+                    "Groq: {} words for {}s audio, retrying with uz",
+                    word_count, audio_duration_secs
+                );
             }
 
             let (text2, _) = self.transcribe_internal(ogg_data, Some("uz")).await?;
@@ -266,7 +292,15 @@ impl GroqTranscriber {
         if text.is_empty() {
             return Ok("Voice message not understood, please type instead".to_string());
         }
-        info!("Groq STT ({}): \"{}\"", if detected.is_empty() { "auto" } else { detected }, truncate(&text, 100));
+        info!(
+            "Groq STT ({}): \"{}\"",
+            if detected.is_empty() {
+                "auto"
+            } else {
+                detected
+            },
+            truncate(&text, 100)
+        );
         Ok(text)
     }
 

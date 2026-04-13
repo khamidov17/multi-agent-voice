@@ -4,8 +4,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-const GEMINI_API_URL: &str =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent";
+const GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent";
 
 pub struct GeminiClient {
     api_key: String,
@@ -27,7 +26,9 @@ struct Content {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Part {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Image {
         #[serde(rename = "inlineData")]
         inline_data: InlineDataInput,
@@ -97,7 +98,9 @@ impl GeminiClient {
 
         let request = GenerateRequest {
             contents: vec![Content {
-                parts: vec![Part::Text { text: prompt.to_string() }],
+                parts: vec![Part::Text {
+                    text: prompt.to_string(),
+                }],
             }],
             generation_config: GenerationConfig {
                 response_modalities: vec!["TEXT".to_string(), "IMAGE".to_string()],
@@ -177,7 +180,9 @@ impl GeminiClient {
                             data: encoded,
                         },
                     },
-                    Part::Text { text: prompt.to_string() },
+                    Part::Text {
+                        text: prompt.to_string(),
+                    },
                 ],
             }],
             generation_config: GenerationConfig {

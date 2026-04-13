@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 /// Tool definition for Claude.
 #[derive(Debug, Clone, Serialize)]
@@ -50,10 +52,7 @@ pub enum ToolCall {
     },
 
     /// Delete a message (admin action - use for spam/abuse).
-    DeleteMessage {
-        chat_id: i64,
-        message_id: i64,
-    },
+    DeleteMessage { chat_id: i64, message_id: i64 },
 
     /// Mute a user temporarily (admin action).
     MuteUser {
@@ -64,21 +63,13 @@ pub enum ToolCall {
     },
 
     /// Ban a user permanently (admin action - use for severe abuse).
-    BanUser {
-        chat_id: i64,
-        user_id: i64,
-    },
+    BanUser { chat_id: i64, user_id: i64 },
 
     /// Kick a user from the group (softer than ban - they can rejoin).
-    KickUser {
-        chat_id: i64,
-        user_id: i64,
-    },
+    KickUser { chat_id: i64, user_id: i64 },
 
     /// Get list of chat administrators.
-    GetChatAdmins {
-        chat_id: i64,
-    },
+    GetChatAdmins { chat_id: i64 },
 
     /// Get list of known members from the database.
     GetMembers {
@@ -131,7 +122,6 @@ pub enum ToolCall {
     },
 
     // === Memory Tools ===
-
     /// Create a new memory file. Fails if file already exists.
     CreateMemory {
         /// Relative path within memories directory (e.g. "users/nodir.md")
@@ -195,6 +185,19 @@ pub enum ToolCall {
         reply_to_message_id: Option<i64>,
     },
 
+    /// Send an existing audio/document file from the filesystem to a chat.
+    SendFile {
+        chat_id: i64,
+        /// Absolute path to the file on disk (e.g. "/Users/ava/Desktop/TestProject/output.wav")
+        file_path: String,
+        /// Optional caption
+        #[serde(skip_serializing_if = "Option::is_none")]
+        caption: Option<String>,
+        /// Optional message ID to reply to
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reply_to_message_id: Option<i64>,
+    },
+
     /// Edit a previously sent message.
     EditMessage {
         chat_id: i64,
@@ -216,10 +219,7 @@ pub enum ToolCall {
     },
 
     /// Unban a user from the group.
-    UnbanUser {
-        chat_id: i64,
-        user_id: i64,
-    },
+    UnbanUser { chat_id: i64, user_id: i64 },
 
     /// Schedule a reminder message.
     SetReminder {
@@ -241,14 +241,10 @@ pub enum ToolCall {
     },
 
     /// Cancel a reminder by ID.
-    CancelReminder {
-        reminder_id: i64,
-    },
+    CancelReminder { reminder_id: i64 },
 
     /// Geocode an address using Yandex (returns coordinates + display name).
-    YandexGeocode {
-        address: String,
-    },
+    YandexGeocode { address: String },
 
     /// Send a static map image for an address using Yandex Maps.
     YandexMap {
@@ -514,13 +510,13 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "send_voice".to_string(),
-            description: "Send a voice message using text-to-speech. Use this to speak to users instead of typing. Good for greetings, announcements, or when a voice reply feels more personal.".to_string(),
+            description: "Send a voice message using text-to-speech. Use this to speak back when a user sends a voice message (match their medium), or for greetings, announcements, and personal moments. Powered by Gemini TTS — sounds natural and warm. Default voice is 'Kore' (warm female). Other options: 'Puck' (energetic male), 'Charon' (deep male), 'Fenrir' (expressive male), 'Aoede' (bright female), 'Leda' (soft female), 'Orus' (neutral).".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "chat_id": { "type": "integer", "description": "Target chat ID" },
-                    "text": { "type": "string", "description": "Text to convert to speech" },
-                    "voice": { "type": "string", "description": "Voice name (default: 'af_heart' - American English female). Options: af_heart, af_bella, am_adam, am_michael" },
+                    "text": { "type": "string", "description": "Text to convert to speech. Keep concise for voice — 1-3 sentences is ideal." },
+                    "voice": { "type": "string", "description": "Gemini voice name. Default: 'Kore' (warm female). Options: Kore, Puck, Charon, Fenrir, Aoede, Leda, Orus." },
                     "reply_to_message_id": { "type": "integer", "description": "Optional message ID to reply to" }
                 },
                 "required": ["chat_id", "text"]
@@ -611,6 +607,20 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "send_file".to_string(),
+            description: "Send an existing file from the filesystem to a Telegram chat. Use this to send audio files (WAV, OGG, MP3), documents, or any file from disk. The file must already exist on the server.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "chat_id": { "type": "integer", "description": "Target chat ID" },
+                    "file_path": { "type": "string", "description": "Absolute path to the file on disk (e.g. /Users/ava/Desktop/TestProject/output.wav)" },
+                    "caption": { "type": "string", "description": "Optional caption for the file" },
+                    "reply_to_message_id": { "type": "integer", "description": "Optional message ID to reply to" }
+                },
+                "required": ["chat_id", "file_path"]
+            }),
+        },
+        Tool {
             name: "send_music".to_string(),
             description: "Generate music from a text prompt using Gemini Lyria and send it to a chat. Use when a user asks for music or a song.".to_string(),
             parameters: serde_json::json!({
@@ -625,7 +635,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "edit_message".to_string(),
-            description: "Edit the text of a message Nemo previously sent.".to_string(),
+            description: "Edit the text of a message Atlas previously sent.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -814,7 +824,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "done".to_string(),
-            description: "Signal that you're done processing. RULES: (1) In DMs — ALWAYS send a message first, then call done. Never call done as the only action in a DM. (2) In groups — you may call done without responding if you weren't mentioned and have nothing to add. (3) After completing any action (send_message, send_photo, etc.) — call done to finish.".to_string(),
+            description: "Legacy stop signal. PREFER using action='stop' with a reason field in the structured output instead. If you use this tool, it acts as action='stop'. In DMs, always send a message first. In groups, you MUST respond to teammate messages before stopping.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {}

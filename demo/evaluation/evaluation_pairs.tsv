@@ -1,0 +1,15 @@
+original_file	anonymized_file	method
+1_single_clean_original.wav	1_single_clean_ohnn.wav	ohnn
+1_single_clean_original.wav	1_single_clean_selection.wav	selection
+2_single_noisy_original.wav	2_single_noisy_denoised.wav	denoised
+2_single_noisy_original.wav	2_single_noisy_ohnn.wav	ohnn
+2_single_noisy_original.wav	2_single_noisy_selection.wav	selection
+3_multi_clean_original.wav	3_multi_clean_ohnn.wav	ohnn
+3_multi_clean_original.wav	3_multi_clean_selection.wav	selection
+3_multi_clean_original.wav	3_multi_clean_tsa_ohnn.wav	tsa_ohnn
+3_multi_clean_original.wav	3_multi_clean_tsa_selection.wav	tsa_selection
+4_multi_noisy_original.wav	4_multi_noisy_denoised.wav	denoised
+4_multi_noisy_original.wav	4_multi_noisy_ohnn.wav	ohnn
+4_multi_noisy_original.wav	4_multi_noisy_selection.wav	selection
+4_multi_noisy_original.wav	4_multi_noisy_tsa_ohnn.wav	tsa_ohnn
+4_multi_noisy_original.wav	4_multi_noisy_tsa_selection.wav	tsa_selection

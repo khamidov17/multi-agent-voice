@@ -8,6 +8,22 @@ use teloxide::types::{ChatId, UserId};
 struct ConfigFile {
     owner_ids: Vec<u64>,
     telegram_bot_token: String,
+    /// Bot display name (e.g. "Atlas", "Nova", "Security").
+    #[serde(default)]
+    bot_name: Option<String>,
+    /// Tier 1 (full permissions) vs Tier 2 (WebSearch only).
+    /// When true, Claude Code gets Bash, Edit, Write, Read, WebSearch.
+    /// When false (default), Claude Code gets WebSearch only.
+    #[serde(default)]
+    full_permissions: bool,
+    /// Custom tool list override. When set, this is used instead of the
+    /// full_permissions boolean. Example: "Bash,Read,WebSearch"
+    #[serde(default)]
+    tools: Option<String>,
+    /// When true, only owner DMs and bot_xona group are accepted.
+    /// Other users/groups are silently ignored.
+    #[serde(default)]
+    owner_dms_only: bool,
     /// Gemini API key for image generation
     #[serde(default)]
     gemini_api_key: String,
@@ -39,7 +55,7 @@ struct ConfigFile {
     /// Premium user IDs (unlimited messages, no rate limit).
     #[serde(default)]
     premium_users: Vec<u64>,
-    /// Public HTTPS URL for the Gemini Live mini app (e.g. "https://nemo.example.com").
+    /// Public HTTPS URL for the Gemini Live mini app (e.g. "https://atlas.example.com").
     live_app_url: Option<String>,
     /// Port for the built-in HTTP server serving the live mini app (default 3001).
     #[serde(default = "default_live_app_port")]
@@ -56,6 +72,10 @@ struct ConfigFile {
     /// Brave Search API key for web search tool.
     #[serde(default)]
     brave_search_api_key: String,
+    /// Dashboard username (required to access /dashboard).
+    dashboard_username: Option<String>,
+    /// Dashboard password (required to access /dashboard).
+    dashboard_password: Option<String>,
 }
 
 fn default_max_strikes() -> u8 {
@@ -69,6 +89,18 @@ fn default_live_app_port() -> u16 {
 pub struct Config {
     pub owner_ids: HashSet<UserId>,
     pub telegram_bot_token: String,
+    /// Bot display name (e.g. "Atlas", "Nova", "Security").
+    pub bot_name: String,
+    /// Absolute path to the directory that contains the config JSON file.
+    /// Used by the /kill handler to write the kill marker where the wrapper
+    /// can find it without needing to parse JSON.
+    pub config_dir: PathBuf,
+    /// Tier 1 = full Claude Code permissions; Tier 2 = WebSearch only.
+    pub full_permissions: bool,
+    /// Custom tool list override (e.g. "Bash,Read,WebSearch" for Sentinel eval).
+    pub tools_override: Option<String>,
+    /// When true, only owner DMs and allowed groups are accepted.
+    pub owner_dms_only: bool,
     pub gemini_api_key: String,
     /// Groq API key for speech-to-text.
     pub groq_api_key: String,
@@ -101,10 +133,21 @@ pub struct Config {
     pub yandex_api_key: String,
     /// Brave Search API key for web search tool.
     pub brave_search_api_key: String,
+    /// Dashboard credentials (loaded from config, never hardcoded).
+    pub dashboard_username: Option<String>,
+    pub dashboard_password: Option<String>,
 }
 
 impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Self {
+        let config_dir = path
+            .as_ref()
+            .canonicalize()
+            .unwrap_or_else(|_| path.as_ref().to_path_buf())
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+
         let content = std::fs::read_to_string(path.as_ref()).expect("Failed to read config file");
         let file: ConfigFile = serde_json::from_str(&content).expect("Failed to parse config file");
 
@@ -138,6 +181,11 @@ impl Config {
         Self {
             owner_ids,
             telegram_bot_token: file.telegram_bot_token,
+            bot_name: file.bot_name.unwrap_or_else(|| "Atlas".to_string()),
+            config_dir,
+            full_permissions: file.full_permissions,
+            tools_override: file.tools,
+            owner_dms_only: file.owner_dms_only,
             gemini_api_key: file.gemini_api_key,
             groq_api_key: file.groq_api_key,
             openai_api_key: file.openai_api_key,
@@ -158,6 +206,8 @@ impl Config {
             live_allowed_users: file.live_allowed_users.into_iter().map(UserId).collect(),
             yandex_api_key: file.yandex_api_key,
             brave_search_api_key: file.brave_search_api_key,
+            dashboard_username: file.dashboard_username,
+            dashboard_password: file.dashboard_password,
         }
     }
 

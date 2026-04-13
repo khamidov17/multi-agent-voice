@@ -35,7 +35,8 @@ impl TtsClient {
 
     /// Get list of available voice reference IDs from Fish Speech.
     pub async fn list_voices(&self) -> Vec<String> {
-        match self.client
+        match self
+            .client
             .get(format!("{}/v1/references/list", self.endpoint))
             .header("Accept", "application/json")
             .send()
@@ -113,19 +114,21 @@ fn convert_wav_to_ogg(wav_data: &[u8]) -> Result<Vec<u8>, String> {
     let input_path = temp_dir.join(format!("tts_input_{}.wav", std::process::id()));
     let output_path = temp_dir.join(format!("tts_output_{}.ogg", std::process::id()));
 
-    std::fs::write(&input_path, wav_data)
-        .map_err(|e| format!("Failed to write temp WAV: {e}"))?;
+    std::fs::write(&input_path, wav_data).map_err(|e| format!("Failed to write temp WAV: {e}"))?;
 
     // Convert using ffmpeg with 300ms silence padding at start
     // (Telegram cuts off the first ~200ms when playing voice messages)
     let output = Command::new("ffmpeg")
         .args([
             "-y",
-            "-f", "lavfi",
-            "-i", "anullsrc=r=44100:cl=mono",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=mono",
             "-i",
             input_path.to_str().unwrap(),
-            "-filter_complex", "[0]atrim=0:0.3[silence];[silence][1:a]concat=n=2:v=0:a=1",
+            "-filter_complex",
+            "[0]atrim=0:0.3[silence];[silence][1:a]concat=n=2:v=0:a=1",
             "-c:a",
             "libopus",
             "-b:a",
@@ -148,13 +151,17 @@ fn convert_wav_to_ogg(wav_data: &[u8]) -> Result<Vec<u8>, String> {
     }
 
     // Read output
-    let ogg_data = std::fs::read(&output_path)
-        .map_err(|e| format!("Failed to read OGG output: {e}"))?;
+    let ogg_data =
+        std::fs::read(&output_path).map_err(|e| format!("Failed to read OGG output: {e}"))?;
 
     // Clean up output
     let _ = std::fs::remove_file(&output_path);
 
-    debug!("Converted WAV ({} bytes) to OGG ({} bytes)", wav_data.len(), ogg_data.len());
+    debug!(
+        "Converted WAV ({} bytes) to OGG ({} bytes)",
+        wav_data.len(),
+        ogg_data.len()
+    );
     Ok(ogg_data)
 }
 
@@ -266,7 +273,9 @@ impl GeminiTtsClient {
 
         let request = Request {
             contents: vec![Content {
-                parts: vec![Part { text: text.to_string() }],
+                parts: vec![Part {
+                    text: text.to_string(),
+                }],
             }],
             generation_config: GenerationConfig {
                 response_modalities: vec!["AUDIO".to_string()],
@@ -289,7 +298,10 @@ impl GeminiTtsClient {
             .map_err(|e| format!("Gemini TTS request failed: {e}"))?;
 
         let status = response.status();
-        let body = response.text().await.map_err(|e| format!("Failed to read Gemini TTS response: {e}"))?;
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read Gemini TTS response: {e}"))?;
 
         if !status.is_success() {
             return Err(format!("Gemini TTS API error {status}: {body}"));
@@ -302,7 +314,9 @@ impl GeminiTtsClient {
             return Err(format!("Gemini TTS error: {}", err.message));
         }
 
-        let candidates = parsed.candidates.ok_or("No candidates in Gemini TTS response")?;
+        let candidates = parsed
+            .candidates
+            .ok_or("No candidates in Gemini TTS response")?;
         let candidate = candidates.into_iter().next().ok_or("Empty candidates")?;
         let content = candidate.content.ok_or("No content in candidate")?;
 
@@ -312,7 +326,11 @@ impl GeminiTtsClient {
                     .decode(&inline_data.data)
                     .map_err(|e| format!("Failed to decode Gemini TTS audio: {e}"))?;
 
-                info!("Gemini TTS: {} bytes, mime={}", audio_bytes.len(), inline_data.mime_type);
+                info!(
+                    "Gemini TTS: {} bytes, mime={}",
+                    audio_bytes.len(),
+                    inline_data.mime_type
+                );
 
                 // Gemini returns PCM audio (audio/L16 at 24000Hz) — convert to OGG Opus
                 let ogg = convert_pcm_to_ogg(&audio_bytes, 24000)?;
@@ -330,18 +348,23 @@ fn convert_pcm_to_ogg(pcm_data: &[u8], sample_rate: u32) -> Result<Vec<u8>, Stri
     let input_path = temp_dir.join(format!("gemini_tts_{}.pcm", std::process::id()));
     let output_path = temp_dir.join(format!("gemini_tts_{}.ogg", std::process::id()));
 
-    std::fs::write(&input_path, pcm_data)
-        .map_err(|e| format!("Failed to write temp PCM: {e}"))?;
+    std::fs::write(&input_path, pcm_data).map_err(|e| format!("Failed to write temp PCM: {e}"))?;
 
     let output = Command::new("ffmpeg")
         .args([
             "-y",
-            "-f", "s16le",
-            "-ar", &sample_rate.to_string(),
-            "-ac", "1",
-            "-i", input_path.to_str().unwrap(),
-            "-c:a", "libopus",
-            "-b:a", "64k",
+            "-f",
+            "s16le",
+            "-ar",
+            &sample_rate.to_string(),
+            "-ac",
+            "1",
+            "-i",
+            input_path.to_str().unwrap(),
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "64k",
             output_path.to_str().unwrap(),
         ])
         .stdin(std::process::Stdio::null())
@@ -358,11 +381,15 @@ fn convert_pcm_to_ogg(pcm_data: &[u8], sample_rate: u32) -> Result<Vec<u8>, Stri
         return Err(format!("ffmpeg PCM conversion failed: {}", stderr));
     }
 
-    let ogg_data = std::fs::read(&output_path)
-        .map_err(|e| format!("Failed to read OGG output: {e}"))?;
+    let ogg_data =
+        std::fs::read(&output_path).map_err(|e| format!("Failed to read OGG output: {e}"))?;
     let _ = std::fs::remove_file(&output_path);
 
-    debug!("Converted PCM ({} bytes) to OGG ({} bytes)", pcm_data.len(), ogg_data.len());
+    debug!(
+        "Converted PCM ({} bytes) to OGG ({} bytes)",
+        pcm_data.len(),
+        ogg_data.len()
+    );
     Ok(ogg_data)
 }
 

@@ -1,4 +1,4 @@
-# Nemo
+# Atlas
 
 A Telegram bot powered by Claude AI. Combines spam filtering with an AI chat participant.
 

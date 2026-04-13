@@ -1,0 +1,22 @@
+# Voice Anonymization Evaluation Dependencies
+# Install: pip install -r eval/requirements.txt
+
+# Metrics
+numpy>=1.24.0
+soundfile>=0.12.0
+librosa>=0.10.0
+jiwer>=3.0.0
+
+# Speaker embeddings & verification
+resemblyzer>=0.1.3
+# speechbrain>=1.0.0  # optional: full EER computation (large install)
+# utmos>=0.1.0         # optional: neural MOS predictor
+
+# Whisper for WER
+openai-whisper>=20231117
+
+# Demo server
+flask>=3.0.0
+
+# Telegram notifications
+requests>=2.31.0

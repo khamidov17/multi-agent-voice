@@ -1,25 +1,33 @@
 mod chatbot;
 mod classifier;
 mod config;
+mod dashboard;
 mod live_api;
 mod prefilter;
 mod telegram_log;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ChatKind, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, KeyboardMarkup, ReplyMarkup, WebAppInfo};
+use teloxide::types::{
+    ChatAction, ChatKind, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
+    KeyboardMarkup, ReplyMarkup, WebAppInfo,
+};
 use tracing::{error, info, warn};
 use tracing_subscriber::prelude::*;
 
-use chatbot::{system_prompt, ChatMessage, ChatbotConfig, ChatbotEngine, ClaudeCode, GroqTranscriber, OpenAITranscriber, ReplyTo, TelegramClient, Whisper};
 use chatbot::document;
-use classifier::{classify, Classification};
+use chatbot::{
+    ChatMessage, ChatbotConfig, ChatbotEngine, ClaudeCode, GroqTranscriber, OpenAITranscriber,
+    ReplyTo, TelegramClient, Whisper, system_prompt,
+};
+use classifier::{Classification, classify};
 use config::Config;
-use prefilter::{prefilter, PrefilterResult};
+use prefilter::{PrefilterResult, prefilter};
 
 /// Max DM messages per hour for free users.
 const FREE_RATE_LIMIT: usize = 50;
@@ -66,7 +74,12 @@ impl BotState {
 
         // Create chatbot if enabled
         let chatbot = if !config.allowed_groups.is_empty() {
-            let primary_chat_id = config.allowed_groups.iter().next().map(|id| id.0).unwrap_or(0);
+            let primary_chat_id = config
+                .allowed_groups
+                .iter()
+                .next()
+                .map(|id| id.0)
+                .unwrap_or(0);
             let owner_user_id = config.owner_ids.iter().next().map(|id| id.0 as i64);
 
             // Open reminder store
@@ -84,21 +97,46 @@ impl BotState {
                 }
             };
 
-            let allowed_chat_ids: HashSet<i64> = config.allowed_groups.iter().map(|id| id.0).collect();
+            let allowed_chat_ids: HashSet<i64> =
+                config.allowed_groups.iter().map(|id| id.0).collect();
+
+            // Shared bot-message bus: derive path from the data directory.
+            // e.g. data/atlas → data/shared/bot_messages.db
+            let shared_bot_messages_db = config
+                .data_dir
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("shared")
+                .join("bot_messages.db");
 
             let chatbot_config = ChatbotConfig {
                 primary_chat_id,
                 bot_user_id,
                 bot_username: bot_username.clone(),
+                bot_name: config.bot_name.clone(),
+                full_permissions: config.full_permissions,
                 owner_user_id,
                 debounce_ms: 1000,
                 data_dir: Some(config.data_dir.clone()),
-                gemini_api_key: if config.gemini_api_key.is_empty() { None } else { Some(config.gemini_api_key.clone()) },
+                gemini_api_key: if config.gemini_api_key.is_empty() {
+                    None
+                } else {
+                    Some(config.gemini_api_key.clone())
+                },
                 tts_endpoint: config.tts_endpoint.clone(),
-                yandex_api_key: if config.yandex_api_key.is_empty() { None } else { Some(config.yandex_api_key.clone()) },
-                brave_search_api_key: if config.brave_search_api_key.is_empty() { None } else { Some(config.brave_search_api_key.clone()) },
+                yandex_api_key: if config.yandex_api_key.is_empty() {
+                    None
+                } else {
+                    Some(config.yandex_api_key.clone())
+                },
+                brave_search_api_key: if config.brave_search_api_key.is_empty() {
+                    None
+                } else {
+                    Some(config.brave_search_api_key.clone())
+                },
                 reminder_store: reminder_store.clone(),
                 allowed_chat_ids,
+                shared_bot_messages_db: Some(shared_bot_messages_db),
             };
 
             // Fetch available TTS voices if endpoint configured
@@ -114,10 +152,60 @@ impl BotState {
                 None
             };
 
+            // Query last message timestamp for time-gap awareness in system prompt
+            let last_interaction = {
+                let db_path = config.data_dir.join("database.db");
+                if db_path.exists() {
+                    rusqlite::Connection::open(&db_path).ok().and_then(|conn| {
+                        conn.query_row(
+                            "SELECT timestamp FROM messages ORDER BY rowid DESC LIMIT 1",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok()
+                    })
+                } else {
+                    None
+                }
+            };
+
             // Start Claude Code with system prompt and session persistence
-            let prompt = system_prompt(&chatbot_config, available_voices.as_deref());
+            let mut prompt = system_prompt(
+                &chatbot_config,
+                available_voices.as_deref(),
+                last_interaction.as_deref(),
+            );
             let session_file = Some(config.data_dir.join("session_id"));
-            let claude_code = match ClaudeCode::start(prompt, session_file) {
+
+            // If no existing session, inject recent message history from the
+            // database so the bot has context even on first start or after a
+            // session reset. This is the safety net for when --resume isn't
+            // available (new server, session overflow, corruption).
+            let has_existing_session = session_file.as_ref().is_some_and(|p| {
+                p.exists() && std::fs::read_to_string(p).is_ok_and(|s| !s.trim().is_empty())
+            });
+            if !has_existing_session {
+                let db_path = config.data_dir.join("database.db");
+                if db_path.exists() {
+                    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+                        let history = build_history_context(&conn, 50);
+                        if !history.is_empty() {
+                            info!(
+                                "📜 No existing session — injecting {} chars of message history",
+                                history.len()
+                            );
+                            prompt.push_str("\n\n");
+                            prompt.push_str(&history);
+                        }
+                    }
+                }
+            }
+            let claude_code = match ClaudeCode::start(
+                prompt,
+                session_file,
+                config.full_permissions,
+                config.tools_override.clone(),
+            ) {
                 Ok(cc) => cc,
                 Err(e) => {
                     panic!("Failed to start Claude Code: {}", e);
@@ -133,6 +221,7 @@ impl BotState {
             }
 
             let mut engine = ChatbotEngine::new(chatbot_config, telegram, claude_code);
+            engine.run_startup_checks().await;
             engine.start_debouncer();
             engine.notify_owner("hey, just restarted").await;
 
@@ -252,14 +341,125 @@ impl BotState {
     }
 }
 
-/// Parse command-line arguments. Returns the config file path.
-fn parse_args() -> String {
+/// Wrapper mode: monitors and restarts the harness process.
+///
+/// Sliding window crash detection: if the harness crashes more than 10 times
+/// within 10 minutes, the wrapper gives up and exits with code 1.
+/// Exponential backoff is applied for rapid crashes (< 10 seconds runtime).
+fn run_wrapper(config_path: &str) -> ! {
+    let mut recent_restarts: Vec<Instant> = Vec::new();
+    let window = Duration::from_secs(600); // 10 minutes
+    let max_restarts = 10;
+    let mut restart_count: u32 = 0;
+
+    // Kill marker lives next to the config file so the wrapper can find it
+    // without having to parse the JSON (avoids pulling in serde here).
+    let config_dir = Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let kill_marker = config_dir.join("kill_marker");
+
+    loop {
+        // Re-resolve binary on every iteration for hot-reload support.
+        let binary = std::env::current_exe()
+            .and_then(|p| p.canonicalize())
+            .expect("Failed to resolve binary path");
+
+        // Check kill marker before spawning.
+        if kill_marker.exists() {
+            eprintln!("[wrapper] Kill marker found, exiting cleanly");
+            std::process::exit(0);
+        }
+
+        let start = Instant::now();
+
+        eprintln!(
+            "[wrapper] Spawning harness: {} {}",
+            binary.display(),
+            config_path
+        );
+
+        let mut child = match std::process::Command::new(&binary).arg(config_path).spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[wrapper] Failed to spawn harness: {e}");
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+        };
+
+        let status = match child.wait() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[wrapper] Failed to wait for harness: {e}");
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+        };
+
+        let runtime = start.elapsed();
+        eprintln!(
+            "[wrapper] Harness exited: {:?} (ran for {:.1}s)",
+            status,
+            runtime.as_secs_f64()
+        );
+
+        // Check kill marker after exit — clean shutdown via /kill command.
+        if kill_marker.exists() {
+            eprintln!("[wrapper] Kill marker found after exit, stopping");
+            std::process::exit(0);
+        }
+
+        // Sliding window crash detection.
+        let now = Instant::now();
+        recent_restarts.push(now);
+        recent_restarts.retain(|t| now.duration_since(*t) < window);
+
+        if recent_restarts.len() > max_restarts {
+            eprintln!(
+                "[wrapper] Too many restarts ({} in {:?}), giving up",
+                recent_restarts.len(),
+                window
+            );
+            std::process::exit(1);
+        }
+
+        // Exponential backoff for rapid crashes.
+        if runtime < Duration::from_secs(10) {
+            restart_count += 1;
+            // 2^restart_count seconds, capped at 64s (2^6).
+            let delay = Duration::from_secs(2u64.pow(restart_count.min(6)));
+            eprintln!(
+                "[wrapper] Rapid crash, backing off {:.0}s",
+                delay.as_secs_f64()
+            );
+            std::thread::sleep(delay);
+        } else {
+            // Reset backoff counter after a healthy run.
+            restart_count = 0;
+        }
+    }
+}
+
+/// Parse command-line arguments.
+/// Returns `(wrapper_mode, config_path)`.
+fn parse_args() -> (bool, String) {
     let args: Vec<String> = std::env::args().collect();
     let mut config_path = "claudir.json".to_string();
+    let mut wrapper_mode = false;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--wrapper" => {
+                wrapper_mode = true;
+                i += 1;
+                // Next argument (if present) is the config path.
+                if i < args.len() && !args[i].starts_with('-') {
+                    config_path = args[i].clone();
+                    i += 1;
+                }
+            }
             arg if !arg.starts_with('-') => {
                 config_path = arg.to_string();
                 i += 1;
@@ -271,12 +471,16 @@ fn parse_args() -> String {
         }
     }
 
-    config_path
+    (wrapper_mode, config_path)
 }
 
 #[tokio::main]
 async fn main() {
-    let config_path = parse_args();
+    let (wrapper_mode, config_path) = parse_args();
+
+    if wrapper_mode {
+        run_wrapper(&config_path);
+    }
     let config = Config::load(&config_path);
 
     let bot = Bot::new(&config.telegram_bot_token);
@@ -330,7 +534,10 @@ async fn main() {
         match start_ngrok(token, port).await {
             Some(url) => {
                 info!("🌐 ngrok tunnel: {}", url);
-                Config { live_app_url: Some(url), ..config }
+                Config {
+                    live_app_url: Some(url),
+                    ..config
+                }
             }
             None => {
                 warn!("ngrok failed to start — live_app_url remains unchanged");
@@ -345,7 +552,11 @@ async fn main() {
 
     // Start HTTP server for Gemini Live mini app
     {
-        let live_allowed: std::collections::HashSet<i64> = state.config.owner_ids.iter().map(|u| u.0 as i64)
+        let live_allowed: std::collections::HashSet<i64> = state
+            .config
+            .owner_ids
+            .iter()
+            .map(|u| u.0 as i64)
             .chain(state.config.live_allowed_users.iter().map(|u| u.0 as i64))
             .collect();
         let api_state = live_api::ApiState {
@@ -353,14 +564,40 @@ async fn main() {
             live_allowed_ids: Arc::new(live_allowed),
             gemini_api_key: state.config.gemini_api_key.clone(),
         };
+
+        // Dashboard state: shared DB is at data_dir/../shared/bot_messages.db
+        let shared_db_path = state
+            .config
+            .data_dir
+            .parent()
+            .unwrap_or(&state.config.data_dir)
+            .join("shared")
+            .join("bot_messages.db");
+        let dash_state = Arc::new(dashboard::DashboardState {
+            shared_db_path,
+            bot_token: state.config.telegram_bot_token.clone(),
+            telegram_bot_token: state.config.telegram_bot_token.clone(),
+            group_chat_id: state
+                .config
+                .allowed_groups
+                .iter()
+                .next()
+                .map(|c| c.0)
+                .unwrap_or(-1003399442526),
+            auth_username: state.config.dashboard_username.clone().unwrap_or_default(),
+            auth_password: state.config.dashboard_password.clone().unwrap_or_default(),
+        });
+
         let port = state.config.live_app_port;
-        let app = live_api::router(api_state);
+        let app = live_api::router(api_state).merge(dashboard::router(dash_state));
         let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
-        info!("🌐 Live mini app HTTP server on port {}", port);
+        info!("🌐 Live mini app + Dashboard HTTP server on port {}", port);
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind(addr).await
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
                 .expect("Failed to bind live app port");
-            axum::serve(listener, app).await
+            axum::serve(listener, app)
+                .await
                 .expect("Live app server error");
         });
     }
@@ -436,8 +673,11 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
 
     let username = user.username.as_deref().unwrap_or(&user.first_name);
 
-    // Handle DMs — open for everyone
+    // Handle DMs — when owner_dms_only, silently ignore non-owner DMs
     if is_private {
+        if state.config.owner_dms_only && !state.config.is_owner(user.id) {
+            return Ok(());
+        }
         return handle_dm(&bot, &msg, user, username, &state).await;
     }
 
@@ -467,7 +707,10 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
     let is_spam = if let Some(text) = text {
         // Owners and trusted channels bypass spam filter
         let bypass_filter = state.config.is_owner(user.id)
-            || msg.sender_chat.as_ref().is_some_and(|c| state.config.is_trusted_channel(c.id));
+            || msg
+                .sender_chat
+                .as_ref()
+                .is_some_and(|c| state.config.is_trusted_channel(c.id));
 
         if bypass_filter {
             info!("Bypass spam filter for {username} ({})", user.id);
@@ -475,27 +718,28 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
         } else {
             let prefilter_result = prefilter(text, &state.config);
             let text_preview: String = text.chars().take(100).collect();
-            info!("Message from {username} ({}): \"{text_preview}\" → {:?}", user.id, prefilter_result);
+            info!(
+                "Message from {username} ({}): \"{text_preview}\" → {:?}",
+                user.id, prefilter_result
+            );
 
             match prefilter_result {
                 PrefilterResult::ObviousSpam => true,
                 PrefilterResult::ObviousSafe => false,
-                PrefilterResult::Ambiguous => {
-                    match classify(text).await {
-                        Ok(Classification::Spam) => {
-                            info!("Haiku: spam");
-                            true
-                        }
-                        Ok(Classification::NotSpam) => {
-                            info!("Haiku: not spam");
-                            false
-                        }
-                        Err(e) => {
-                            warn!("Classification error: {e}");
-                            false
-                        }
+                PrefilterResult::Ambiguous => match classify(text).await {
+                    Ok(Classification::Spam) => {
+                        info!("Haiku: spam");
+                        true
                     }
-                }
+                    Ok(Classification::NotSpam) => {
+                        info!("Haiku: not spam");
+                        false
+                    }
+                    Err(e) => {
+                        warn!("Classification error: {e}");
+                        false
+                    }
+                },
             }
         }
     } else {
@@ -560,7 +804,13 @@ async fn handle_new_message(bot: Bot, msg: Message, state: Arc<BotState>) -> Res
         // Extract document text if present
         let document_text = extract_document(&bot, &msg).await;
 
-        let chat_msg = telegram_to_chat_message_with_media(&msg, image, photo_file_id, voice_transcription, document_text);
+        let chat_msg = telegram_to_chat_message_with_media(
+            &msg,
+            image,
+            photo_file_id,
+            voice_transcription,
+            document_text,
+        );
         chatbot.handle_message(chat_msg).await;
     }
 
@@ -577,6 +827,37 @@ async fn handle_dm(
 ) -> ResponseResult<()> {
     let text = msg.text().unwrap_or("");
 
+    // /kill command — owner-only graceful shutdown with kill marker.
+    // Writes a marker file so the wrapper process does not restart the harness.
+    if text == "/kill" {
+        if !state.config.is_owner(user.id) {
+            bot.send_message(msg.chat.id, "Access denied.").await.ok();
+            return Ok(());
+        }
+
+        info!(
+            "/kill from owner {} ({}), writing kill marker and shutting down",
+            username, user.id
+        );
+
+        // Write kill marker next to the config file so the wrapper can find it
+        // without parsing JSON (matches the wrapper's kill_marker path).
+        let kill_marker = state.config.config_dir.join("kill_marker");
+
+        if let Err(e) = std::fs::write(&kill_marker, b"") {
+            warn!("Failed to write kill marker at {:?}: {e}", kill_marker);
+        }
+
+        bot.send_message(msg.chat.id, "Shutting down. Wrapper will not restart.")
+            .await
+            .ok();
+
+        // Give Telegram a moment to deliver the reply before we exit.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        std::process::exit(0);
+    }
+
     // /live command — open Gemini Live mini app (owners + live_allowed_users)
     if text == "/live" {
         if !state.config.can_use_live(user.id) {
@@ -589,21 +870,25 @@ async fn handle_dm(
         match &state.config.live_app_url {
             Some(url) => {
                 let web_app_url = format!("{}/live", url.trim_end_matches('/'));
-                let keyboard = InlineKeyboardMarkup::new(vec![vec![
-                    InlineKeyboardButton::web_app(
-                        "🎤 Open Nemo Live",
-                        WebAppInfo { url: reqwest::Url::parse(&web_app_url).unwrap() },
-                    ),
-                ]]);
-                bot.send_message(msg.chat.id, "Open Nemo Live voice assistant:")
+                let keyboard =
+                    InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::web_app(
+                        "🎤 Open Atlas Live",
+                        WebAppInfo {
+                            url: reqwest::Url::parse(&web_app_url).unwrap(),
+                        },
+                    )]]);
+                bot.send_message(msg.chat.id, "Open Atlas Live voice assistant:")
                     .reply_markup(ReplyMarkup::InlineKeyboard(keyboard))
                     .await
                     .ok();
             }
             None => {
-                bot.send_message(msg.chat.id, "⚠️ live_app_url not configured in claudir.json")
-                    .await
-                    .ok();
+                bot.send_message(
+                    msg.chat.id,
+                    "⚠️ live_app_url not configured in claudir.json",
+                )
+                .await
+                .ok();
             }
         }
         return Ok(());
@@ -614,7 +899,7 @@ async fn handle_dm(
         info!("/start from {} ({})", username, user.id);
 
         let welcome = "\
-<b>Nemo</b> — Your Telegram Assistant / Telegramdagi yordamchingiz
+<b>Atlas</b> — Your Telegram Assistant / Telegramdagi yordamchingiz
 
 By using this bot, you agree to the terms of service:
 Botdan foydalanish orqali siz foydalanish shartlariga rozilik bildirasiz:
@@ -622,12 +907,10 @@ Botdan foydalanish orqali siz foydalanish shartlariga rozilik bildirasiz:
 • Illegal or harmful content is not allowed / Noqonuniy yoki zararli kontentga ruxsat berilmaydi
 • Conversations may be processed to improve quality / Suhbatlar sifatni yaxshilash uchun qayta ishlanishi mumkin";
 
-        let keyboard = KeyboardMarkup::new(vec![
-            vec![
-                KeyboardButton::new("Agree / Roziman ✅"),
-                KeyboardButton::new("Decline / Rad etaman ❌"),
-            ],
-        ])
+        let keyboard = KeyboardMarkup::new(vec![vec![
+            KeyboardButton::new("Agree / Roziman ✅"),
+            KeyboardButton::new("Decline / Rad etaman ❌"),
+        ]])
         .resize_keyboard()
         .one_time_keyboard();
 
@@ -694,19 +977,20 @@ Botdan foydalanish orqali siz foydalanish shartlariga rozilik bildirasiz:
                 return Ok(());
             } else {
                 // Unrecognized — re-show buttons
-                let keyboard = KeyboardMarkup::new(vec![
-                    vec![
-                        KeyboardButton::new("Agree / Roziman ✅"),
-                        KeyboardButton::new("Decline / Rad etaman ❌"),
-                    ],
-                ])
+                let keyboard = KeyboardMarkup::new(vec![vec![
+                    KeyboardButton::new("Agree / Roziman ✅"),
+                    KeyboardButton::new("Decline / Rad etaman ❌"),
+                ]])
                 .resize_keyboard()
                 .one_time_keyboard();
 
-                bot.send_message(msg.chat.id, "Please tap a button / Iltimos, tugmani bosing:")
-                    .reply_markup(ReplyMarkup::Keyboard(keyboard))
-                    .await
-                    .ok();
+                bot.send_message(
+                    msg.chat.id,
+                    "Please tap a button / Iltimos, tugmani bosing:",
+                )
+                .reply_markup(ReplyMarkup::Keyboard(keyboard))
+                .await
+                .ok();
                 return Ok(());
             }
         }
@@ -741,7 +1025,10 @@ Botdan foydalanish orqali siz foydalanish shartlariga rozilik bildirasiz:
         }
         Some(remaining) => {
             if remaining <= 10 && remaining > 0 && !state.config.is_premium(user.id) {
-                info!("DM from {} ({}) — {} messages remaining", username, user.id, remaining);
+                info!(
+                    "DM from {} ({}) — {} messages remaining",
+                    username, user.id, remaining
+                );
             }
         }
     }
@@ -751,9 +1038,12 @@ Botdan foydalanish orqali siz foydalanish shartlariga rozilik bildirasiz:
         Some(c) => c,
         None => {
             error!("DM from {} but chatbot not initialized", username);
-            bot.send_message(msg.chat.id, "Bot hozircha ishlamayapti. Keyinroq urinib ko'ring.")
-                .await
-                .ok();
+            bot.send_message(
+                msg.chat.id,
+                "Bot hozircha ishlamayapti. Keyinroq urinib ko'ring.",
+            )
+            .await
+            .ok();
             return Ok(());
         }
     };
@@ -790,11 +1080,21 @@ Botdan foydalanish orqali siz foydalanish shartlariga rozilik bildirasiz:
     let document_text = extract_document(bot, msg).await;
 
     // Skip if no content at all
-    if text.is_empty() && image.is_none() && voice_transcription.is_none() && document_text.is_none() {
+    if text.is_empty()
+        && image.is_none()
+        && voice_transcription.is_none()
+        && document_text.is_none()
+    {
         return Ok(());
     }
 
-    let chat_msg = telegram_to_chat_message_with_media(msg, image, photo_file_id, voice_transcription, document_text);
+    let chat_msg = telegram_to_chat_message_with_media(
+        msg,
+        image,
+        photo_file_id,
+        voice_transcription,
+        document_text,
+    );
     chatbot.handle_message(chat_msg).await;
 
     Ok(())
@@ -824,14 +1124,16 @@ fn telegram_to_chat_message_with_media(
 
     let timestamp = msg.date.format("%Y-%m-%d %H:%M").to_string();
     // Use text, or caption (for images/voice), or document text, or empty
-    let base_text = msg.text()
+    let base_text = msg
+        .text()
         .or_else(|| msg.caption())
         .unwrap_or("")
         .to_string();
 
     // Prepend document content to the message text so Claude sees it
     let text = if let Some(ref doc) = document_text {
-        let filename = msg.document()
+        let filename = msg
+            .document()
             .and_then(|d| d.file_name.as_deref())
             .unwrap_or("document");
         if base_text.is_empty() {
@@ -847,7 +1149,11 @@ fn telegram_to_chat_message_with_media(
         let reply_user = reply.from.as_ref();
         let reply_username = reply_user
             .and_then(|u| u.username.as_deref())
-            .unwrap_or_else(|| reply_user.map(|u| u.first_name.as_str()).unwrap_or("unknown"))
+            .unwrap_or_else(|| {
+                reply_user
+                    .map(|u| u.first_name.as_str())
+                    .unwrap_or("unknown")
+            })
             .to_string();
 
         ReplyTo {
@@ -879,9 +1185,11 @@ async fn transcribe_voice(bot: &Bot, state: &BotState, msg: &Message) -> Option<
 
     let voice = msg.voice()?;
 
-    info!("🎤 Voice message from user {} ({} seconds)",
-          msg.from.as_ref().map(|u| u.id.0).unwrap_or(0),
-          voice.duration);
+    info!(
+        "🎤 Voice message from user {} ({} seconds)",
+        msg.from.as_ref().map(|u| u.id.0).unwrap_or(0),
+        voice.duration
+    );
 
     // Download voice file
     let file = match bot.get_file(voice.file.id.clone()).await {
@@ -959,29 +1267,39 @@ async fn extract_document(bot: &Bot, msg: &Message) -> Option<String> {
         return None;
     }
 
-    info!("📎 Document from user {}: {} ({} bytes)",
-          msg.from.as_ref().map(|u| u.id.0).unwrap_or(0),
-          filename, doc.file.size);
+    info!(
+        "📎 Document from user {}: {} ({} bytes)",
+        msg.from.as_ref().map(|u| u.id.0).unwrap_or(0),
+        filename,
+        doc.file.size
+    );
 
     let file = match bot.get_file(doc.file.id.clone()).await {
         Ok(f) => f,
         Err(e) => {
             warn!("Failed to get document file info: {}", e);
-            return Some(format!("[Document '{}' - download failed: {}]", filename, e));
+            return Some(format!(
+                "[Document '{}' - download failed: {}]",
+                filename, e
+            ));
         }
     };
 
     let mut data = Vec::new();
     if let Err(e) = bot.download_file(&file.path, &mut data).await {
         warn!("Failed to download document: {}", e);
-        return Some(format!("[Document '{}' - download failed: {}]", filename, e));
+        return Some(format!(
+            "[Document '{}' - download failed: {}]",
+            filename, e
+        ));
     }
 
     info!("📥 Downloaded document ({} bytes)", data.len());
 
     // Extract text on blocking thread (file I/O + subprocess)
     let filename_owned = filename.to_string();
-    match tokio::task::spawn_blocking(move || document::extract_text(&filename_owned, &data)).await {
+    match tokio::task::spawn_blocking(move || document::extract_text(&filename_owned, &data)).await
+    {
         Ok(Some(text)) => {
             let preview: String = text.chars().take(80).collect();
             info!("📄 Extracted document text: \"{}\"...", preview);
@@ -1022,7 +1340,10 @@ async fn handle_edited_message(msg: Message, state: Arc<BotState>) -> ResponseRe
     Ok(())
 }
 
-async fn handle_chat_member(update: teloxide::types::ChatMemberUpdated, state: Arc<BotState>) -> ResponseResult<()> {
+async fn handle_chat_member(
+    update: teloxide::types::ChatMemberUpdated,
+    state: Arc<BotState>,
+) -> ResponseResult<()> {
     // Only track for allowed groups
     if !state.config.allowed_groups.is_empty()
         && !state.config.allowed_groups.contains(&update.chat.id)
@@ -1043,9 +1364,14 @@ async fn handle_chat_member(update: teloxide::types::ChatMemberUpdated, state: A
     match update.new_chat_member.status() {
         ChatMemberStatus::Member | ChatMemberStatus::Administrator | ChatMemberStatus::Owner => {
             // User joined or was added
-            if matches!(update.old_chat_member.status(), ChatMemberStatus::Left | ChatMemberStatus::Banned) {
+            if matches!(
+                update.old_chat_member.status(),
+                ChatMemberStatus::Left | ChatMemberStatus::Banned
+            ) {
                 info!("👋 Member joined: {} ({})", first_name, user_id);
-                chatbot.handle_member_joined(user_id, username, first_name).await;
+                chatbot
+                    .handle_member_joined(user_id, username, first_name)
+                    .await;
             }
         }
         ChatMemberStatus::Left => {
@@ -1060,4 +1386,64 @@ async fn handle_chat_member(update: teloxide::types::ChatMemberUpdated, state: A
     }
 
     Ok(())
+}
+
+/// Build a recent message history context string from the database.
+/// Used when starting a fresh session (no --resume) to give the bot
+/// awareness of what happened before the session reset.
+fn build_history_context(conn: &rusqlite::Connection, limit: usize) -> String {
+    let mut stmt = match conn.prepare(
+        "SELECT message_id, chat_id, user_id, username, timestamp, text
+         FROM messages
+         ORDER BY rowid DESC
+         LIMIT ?1",
+    ) {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+
+    let rows: Vec<(i64, i64, i64, String, String, String)> = stmt
+        .query_map(rusqlite::params![limit as i64], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .ok()
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from(
+        "# Recent Message History (restored from database — your session was reset)\n\n\
+         These are the most recent messages from before your session reset. \
+         Use them to maintain conversational continuity.\n\n",
+    );
+
+    // Rows are in reverse order (newest first), reverse for chronological
+    for (msg_id, chat_id, user_id, username, timestamp, text) in rows.into_iter().rev() {
+        // Escape XML content like the normal message formatter does
+        let escaped_text = text
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        let time_short = if timestamp.len() >= 16 {
+            &timestamp[11..16] // HH:MM
+        } else {
+            &timestamp
+        };
+        out.push_str(&format!(
+            "<msg id=\"{}\" chat=\"{}\" user=\"{}\" name=\"{}\" time=\"{}\">{}</msg>\n",
+            msg_id, chat_id, user_id, username, time_short, escaped_text
+        ));
+    }
+
+    out
 }

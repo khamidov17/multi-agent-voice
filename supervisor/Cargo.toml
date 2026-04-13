@@ -1,10 +1,10 @@
 [package]
-name = "jumavoy"
+name = "nova"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "jumavoy"
+name = "nova"
 path = "src/main.rs"
 
 [dependencies]

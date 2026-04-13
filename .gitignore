@@ -12,3 +12,19 @@ data/
 
 # Supervisor build artifacts
 supervisor/target/
+
+# Bot config files (contain tokens — never commit)
+atlas.json
+nova.json
+security.json
+nova-supervisor.json
+*-supervisor.json
+
+# Environment variables (secrets)
+.env
+
+# Voiceanon agent config files (contain bot tokens — never commit)
+voiceanon/*.json
+
+# Voiceanon runtime data (logs, sessions, SQLite databases)
+voiceanon/data/

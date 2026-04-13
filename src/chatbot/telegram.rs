@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use teloxide::net::Download;
 use teloxide::prelude::*;
-use teloxide::types::{ChatAction, ChatPermissions, FileId, InputFile, MessageId, ParseMode, ReactionType, ReplyParameters, UserId};
+use teloxide::types::{
+    ChatAction, ChatPermissions, FileId, InputFile, MessageId, ParseMode, ReactionType,
+    ReplyParameters, UserId,
+};
 use tracing::{info, warn};
 
 /// User info from Telegram.
@@ -35,6 +38,13 @@ impl TelegramClient {
         Self { bot }
     }
 
+    /// Return a clone of the underlying `Bot` handle.
+    /// Used by the health monitor to call `getMe` without going through the
+    /// full `TelegramClient` retry stack.
+    pub fn bot_handle(&self) -> Bot {
+        self.bot.clone()
+    }
+
     /// Check if an error is retryable (transient)
     fn is_retryable_error(err: &teloxide::RequestError) -> bool {
         use teloxide::RequestError::*;
@@ -43,7 +53,10 @@ impl TelegramClient {
             Api(api_err) => {
                 // Check for server errors in the error message
                 let msg = format!("{:?}", api_err);
-                msg.contains("500") || msg.contains("502") || msg.contains("503") || msg.contains("504")
+                msg.contains("500")
+                    || msg.contains("502")
+                    || msg.contains("503")
+                    || msg.contains("504")
             }
             _ => false,
         }
@@ -75,7 +88,9 @@ impl TelegramClient {
                     let err_str = format!("{e}");
 
                     // If reply message not found, retry without reply_to (doesn't count as attempt)
-                    if err_str.contains("message to be replied not found") && current_reply_to.is_some() {
+                    if err_str.contains("message to be replied not found")
+                        && current_reply_to.is_some()
+                    {
                         warn!("Reply target not found, retrying without reply_to");
                         current_reply_to = None;
                         continue;
@@ -83,7 +98,12 @@ impl TelegramClient {
 
                     if attempt < MAX_RETRIES && Self::is_retryable_error(&e) {
                         let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
-                        warn!("Send failed (attempt {}), retrying in {}ms: {}", attempt + 1, delay, e);
+                        warn!(
+                            "Send failed (attempt {}), retrying in {}ms: {}",
+                            attempt + 1,
+                            delay,
+                            e
+                        );
                         tokio::time::sleep(Duration::from_millis(delay)).await;
                         attempt += 1;
                         continue;
@@ -117,8 +137,12 @@ impl TelegramClient {
 
         // Extract status and custom title from member kind
         let (status, custom_title) = match &member.kind {
-            teloxide::types::ChatMemberKind::Owner(o) => ("owner".to_string(), o.custom_title.clone()),
-            teloxide::types::ChatMemberKind::Administrator(a) => ("administrator".to_string(), a.custom_title.clone()),
+            teloxide::types::ChatMemberKind::Owner(o) => {
+                ("owner".to_string(), o.custom_title.clone())
+            }
+            teloxide::types::ChatMemberKind::Administrator(a) => {
+                ("administrator".to_string(), a.custom_title.clone())
+            }
             teloxide::types::ChatMemberKind::Member(_) => ("member".to_string(), None),
             teloxide::types::ChatMemberKind::Restricted(_) => ("restricted".to_string(), None),
             teloxide::types::ChatMemberKind::Left => ("left".to_string(), None),
@@ -162,11 +186,16 @@ impl TelegramClient {
 
         // Get the largest available size for better quality
         let photo = photo_sizes.last().unwrap();
-        let file = self.bot.get_file(photo.file.id.clone()).await
+        let file = self
+            .bot
+            .get_file(photo.file.id.clone())
+            .await
             .map_err(|e| format!("Failed to get photo file: {e}"))?;
 
         let mut data = Vec::new();
-        self.bot.download_file(&file.path, &mut data).await
+        self.bot
+            .download_file(&file.path, &mut data)
+            .await
             .map_err(|e| format!("Failed to download photo: {e}"))?;
 
         info!("Downloaded profile photo ({} bytes)", data.len());
@@ -179,7 +208,10 @@ impl TelegramClient {
         message_id: i64,
         emoji: &str,
     ) -> Result<(), String> {
-        info!("Adding reaction {} to msg {} in chat {}", emoji, message_id, chat_id);
+        info!(
+            "Adding reaction {} to msg {} in chat {}",
+            emoji, message_id, chat_id
+        );
 
         let chat_id = ChatId(chat_id);
         let message_id = MessageId(message_id as i32);
@@ -223,7 +255,10 @@ impl TelegramClient {
         user_id: i64,
         duration_minutes: i64,
     ) -> Result<(), String> {
-        info!("🔇 Muting user {} in chat {} for {} minutes", user_id, chat_id, duration_minutes);
+        info!(
+            "🔇 Muting user {} in chat {} for {} minutes",
+            user_id, chat_id, duration_minutes
+        );
 
         let until = chrono::Utc::now() + Duration::from_secs((duration_minutes * 60) as u64);
 
@@ -323,7 +358,11 @@ impl TelegramClient {
         caption: Option<&str>,
         reply_to_message_id: Option<i64>,
     ) -> Result<i64, String> {
-        info!("📷 Sending image to chat {} ({} bytes)", chat_id, image_data.len());
+        info!(
+            "📷 Sending image to chat {} ({} bytes)",
+            chat_id,
+            image_data.len()
+        );
 
         let chat_id_obj = ChatId(chat_id);
         let mut current_reply_to = reply_to_message_id;
@@ -347,7 +386,9 @@ impl TelegramClient {
                     let err_str = format!("{e}");
 
                     // If reply message not found, retry without reply_to
-                    if err_str.contains("message to be replied not found") && current_reply_to.is_some() {
+                    if err_str.contains("message to be replied not found")
+                        && current_reply_to.is_some()
+                    {
                         warn!("Reply target not found for image, retrying without reply_to");
                         current_reply_to = None;
                         continue;
@@ -355,7 +396,12 @@ impl TelegramClient {
 
                     if attempt < MAX_RETRIES && Self::is_retryable_error(&e) {
                         let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
-                        warn!("Send image failed (attempt {}), retrying in {}ms: {}", attempt + 1, delay, e);
+                        warn!(
+                            "Send image failed (attempt {}), retrying in {}ms: {}",
+                            attempt + 1,
+                            delay,
+                            e
+                        );
                         tokio::time::sleep(Duration::from_millis(delay)).await;
                         continue;
                     }
@@ -376,7 +422,11 @@ impl TelegramClient {
         title: Option<&str>,
         reply_to_message_id: Option<i64>,
     ) -> Result<i64, String> {
-        info!("🎵 Sending audio to chat {} ({} bytes)", chat_id, audio_data.len());
+        info!(
+            "🎵 Sending audio to chat {} ({} bytes)",
+            chat_id,
+            audio_data.len()
+        );
 
         let chat_id_obj = ChatId(chat_id);
         let mut current_reply_to = reply_to_message_id;
@@ -399,7 +449,9 @@ impl TelegramClient {
                 Err(e) => {
                     let err_str = format!("{e}");
 
-                    if err_str.contains("message to be replied not found") && current_reply_to.is_some() {
+                    if err_str.contains("message to be replied not found")
+                        && current_reply_to.is_some()
+                    {
                         warn!("Reply target not found for audio, retrying without reply_to");
                         current_reply_to = None;
                         continue;
@@ -407,7 +459,12 @@ impl TelegramClient {
 
                     if attempt < MAX_RETRIES && Self::is_retryable_error(&e) {
                         let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
-                        warn!("Send audio failed (attempt {}), retrying in {}ms: {}", attempt + 1, delay, e);
+                        warn!(
+                            "Send audio failed (attempt {}), retrying in {}ms: {}",
+                            attempt + 1,
+                            delay,
+                            e
+                        );
                         tokio::time::sleep(Duration::from_millis(delay)).await;
                         continue;
                     }
@@ -429,7 +486,12 @@ impl TelegramClient {
         caption: Option<&str>,
         reply_to_message_id: Option<i64>,
     ) -> Result<i64, String> {
-        info!("📄 Sending document '{}' to chat {} ({} bytes)", filename, chat_id, data.len());
+        info!(
+            "📄 Sending document '{}' to chat {} ({} bytes)",
+            filename,
+            chat_id,
+            data.len()
+        );
 
         let chat_id_obj = ChatId(chat_id);
         let mut current_reply_to = reply_to_message_id;
@@ -452,7 +514,9 @@ impl TelegramClient {
                 Err(e) => {
                     let err_str = format!("{e}");
 
-                    if err_str.contains("message to be replied not found") && current_reply_to.is_some() {
+                    if err_str.contains("message to be replied not found")
+                        && current_reply_to.is_some()
+                    {
                         warn!("Reply target not found for document, retrying without reply_to");
                         current_reply_to = None;
                         continue;
@@ -460,7 +524,12 @@ impl TelegramClient {
 
                     if attempt < MAX_RETRIES && Self::is_retryable_error(&e) {
                         let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
-                        warn!("Send document failed (attempt {}), retrying in {}ms: {}", attempt + 1, delay, e);
+                        warn!(
+                            "Send document failed (attempt {}), retrying in {}ms: {}",
+                            attempt + 1,
+                            delay,
+                            e
+                        );
                         tokio::time::sleep(Duration::from_millis(delay)).await;
                         continue;
                     }
@@ -475,13 +544,22 @@ impl TelegramClient {
 
     /// Send "typing..." indicator to a chat.
     pub async fn send_typing(&self, chat_id: i64) {
-        if let Err(e) = self.bot.send_chat_action(ChatId(chat_id), ChatAction::Typing).await {
+        if let Err(e) = self
+            .bot
+            .send_chat_action(ChatId(chat_id), ChatAction::Typing)
+            .await
+        {
             warn!("Failed to send typing indicator: {}", e);
         }
     }
 
     /// Edit the text of a previously sent message.
-    pub async fn edit_message(&self, chat_id: i64, message_id: i64, text: &str) -> Result<(), String> {
+    pub async fn edit_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+    ) -> Result<(), String> {
         self.bot
             .edit_message_text(ChatId(chat_id), MessageId(message_id as i32), text)
             .parse_mode(ParseMode::Html)
@@ -500,7 +578,8 @@ impl TelegramClient {
         allows_multiple_answers: bool,
     ) -> Result<i64, String> {
         use teloxide::types::PollType;
-        let options: Vec<teloxide::types::InputPollOption> = options.iter()
+        let options: Vec<teloxide::types::InputPollOption> = options
+            .iter()
             .map(|o| teloxide::types::InputPollOption::new(o.clone()))
             .collect();
         self.bot
@@ -527,17 +606,20 @@ impl TelegramClient {
     /// Returns (bytes, media_type).
     pub async fn download_image(&self, file_id: &str) -> Result<(Vec<u8>, String), String> {
         // Get file info
-        let file = self.bot.get_file(FileId(file_id.to_string())).await.map_err(|e| {
-            format!("Failed to get file info: {e}")
-        })?;
+        let file = self
+            .bot
+            .get_file(FileId(file_id.to_string()))
+            .await
+            .map_err(|e| format!("Failed to get file info: {e}"))?;
 
         let file_path = &file.path;
 
         // Download file content
         let mut data = Vec::new();
-        self.bot.download_file(file_path, &mut data).await.map_err(|e| {
-            format!("Failed to download file: {e}")
-        })?;
+        self.bot
+            .download_file(file_path, &mut data)
+            .await
+            .map_err(|e| format!("Failed to download file: {e}"))?;
 
         // Determine media type from extension
         let media_type = if file_path.ends_with(".jpg") || file_path.ends_with(".jpeg") {
@@ -562,7 +644,11 @@ impl TelegramClient {
         caption: Option<&str>,
         reply_to_message_id: Option<i64>,
     ) -> Result<i64, String> {
-        info!("🔊 Sending voice to chat {} ({} bytes)", chat_id, voice_data.len());
+        info!(
+            "🔊 Sending voice to chat {} ({} bytes)",
+            chat_id,
+            voice_data.len()
+        );
 
         let chat_id_obj = ChatId(chat_id);
         let mut current_reply_to = reply_to_message_id;
@@ -586,7 +672,9 @@ impl TelegramClient {
                     let err_str = format!("{e}");
 
                     // If reply message not found, retry without reply_to
-                    if err_str.contains("message to be replied not found") && current_reply_to.is_some() {
+                    if err_str.contains("message to be replied not found")
+                        && current_reply_to.is_some()
+                    {
                         warn!("Reply target not found for voice, retrying without reply_to");
                         current_reply_to = None;
                         continue;
@@ -594,7 +682,12 @@ impl TelegramClient {
 
                     if attempt < MAX_RETRIES && Self::is_retryable_error(&e) {
                         let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
-                        warn!("Send voice failed (attempt {}), retrying in {}ms: {}", attempt + 1, delay, e);
+                        warn!(
+                            "Send voice failed (attempt {}), retrying in {}ms: {}",
+                            attempt + 1,
+                            delay,
+                            e
+                        );
                         tokio::time::sleep(Duration::from_millis(delay)).await;
                         continue;
                     }
@@ -606,5 +699,4 @@ impl TelegramClient {
         }
         unreachable!()
     }
-
 }

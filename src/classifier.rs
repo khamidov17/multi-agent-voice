@@ -41,7 +41,10 @@ Respond with exactly one word: SPAM or NOT_SPAM"#
         return Err(format!("Claude classifier failed: {stderr}"));
     }
 
-    let result = String::from_utf8_lossy(&output.stdout).trim().to_uppercase().to_string();
+    let result = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_uppercase()
+        .to_string();
 
     if result.contains("SPAM") && !result.contains("NOT") {
         Ok(Classification::Spam)

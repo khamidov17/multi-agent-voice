@@ -40,8 +40,14 @@ pub async fn geocode(address: &str, api_key: &str) -> Result<(String, f64, f64),
         .ok_or("No position in geocode result")?;
 
     let mut parts = pos.split_whitespace();
-    let lon: f64 = parts.next().and_then(|s| s.parse().ok()).ok_or("Invalid longitude")?;
-    let lat: f64 = parts.next().and_then(|s| s.parse().ok()).ok_or("Invalid latitude")?;
+    let lon: f64 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or("Invalid longitude")?;
+    let lat: f64 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or("Invalid latitude")?;
 
     info!("📍 Geocoded '{}' → {}, {} (lon, lat)", address, lon, lat);
     Ok((name, lon, lat))
@@ -63,6 +69,9 @@ pub async fn static_map(lon: f64, lat: f64, api_key: &str, zoom: u8) -> Result<V
         return Err(format!("Yandex static map HTTP {}", resp.status()));
     }
 
-    let bytes = resp.bytes().await.map_err(|e| format!("Read map image: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Read map image: {e}"))?;
     Ok(bytes.to_vec())
 }

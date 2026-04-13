@@ -1,18 +1,18 @@
 [Unit]
-Description=Jumavoy Supervisor Bot
-After=network.target nemo.service
-Wants=nemo.service
+Description=Nova Supervisor Bot
+After=network.target atlas.service
+Wants=atlas.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/opt/jumavoy
-ExecStart=/opt/jumavoy/target/release/jumavoy /opt/jumavoy/data/prod/jumavoy.json
+WorkingDirectory=/opt/nova
+ExecStart=/opt/nova/target/release/nova /opt/nova/data/prod/nova.json
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=jumavoy
+SyslogIdentifier=nova
 
 # Allow full system access (intentional — supervisor needs it)
 NoNewPrivileges=false

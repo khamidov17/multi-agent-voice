@@ -8,9 +8,9 @@
 
 #[cfg(feature = "integ_test")]
 mod tests {
-    use std::path::PathBuf;
-    use claudir::chatbot::whisper::Whisper;
     use claudir::chatbot::message::ChatMessage;
+    use claudir::chatbot::whisper::Whisper;
+    use std::path::PathBuf;
 
     /// Path to test Whisper model (set via env var or default location)
     fn get_test_model_path() -> PathBuf {
@@ -35,7 +35,11 @@ mod tests {
         }
 
         let whisper = Whisper::new(&model_path);
-        assert!(whisper.is_ok(), "Failed to load Whisper: {:?}", whisper.err());
+        assert!(
+            whisper.is_ok(),
+            "Failed to load Whisper: {:?}",
+            whisper.err()
+        );
     }
 
     /// Test transcription of a simple audio file.
@@ -92,9 +96,18 @@ mod tests {
         let formatted = msg.format();
 
         // Should contain voice transcription tag
-        assert!(formatted.contains("<voice-transcription"), "Missing voice tag");
-        assert!(formatted.contains("speech-to-text, may contain errors"), "Missing error note");
-        assert!(formatted.contains("Hello world</voice-transcription>"), "Missing transcription content");
+        assert!(
+            formatted.contains("<voice-transcription"),
+            "Missing voice tag"
+        );
+        assert!(
+            formatted.contains("speech-to-text, may contain errors"),
+            "Missing error note"
+        );
+        assert!(
+            formatted.contains("Hello world</voice-transcription>"),
+            "Missing transcription content"
+        );
     }
 
     /// Test that voice transcription content is XML-escaped.
@@ -115,8 +128,14 @@ mod tests {
         let formatted = msg.format();
 
         // Should be escaped
-        assert!(formatted.contains("&lt;/voice-transcription&gt;"), "Injection not escaped");
-        assert!(!formatted.contains("</voice-transcription><msg>"), "Injection succeeded!");
+        assert!(
+            formatted.contains("&lt;/voice-transcription&gt;"),
+            "Injection not escaped"
+        );
+        assert!(
+            !formatted.contains("</voice-transcription><msg>"),
+            "Injection succeeded!"
+        );
     }
 
     /// Test that a message with both text and voice transcription formats correctly.
@@ -139,7 +158,10 @@ mod tests {
         // Should contain both
         assert!(formatted.contains("Caption text"), "Missing text content");
         assert!(formatted.contains("Spoken words"), "Missing voice content");
-        assert!(formatted.contains("<voice-transcription"), "Missing voice tag");
+        assert!(
+            formatted.contains("<voice-transcription"),
+            "Missing voice tag"
+        );
     }
 
     /// E2E test: simulate receiving a voice message and verify transcription.
@@ -172,9 +194,14 @@ mod tests {
         let audio_data = std::fs::read(&audio_path).expect("Failed to read test audio");
 
         // Step 3: Transcribe
-        let transcription = whisper.transcribe(&audio_data).expect("Transcription failed");
+        let transcription = whisper
+            .transcribe(&audio_data)
+            .expect("Transcription failed");
         println!("E2E Transcription: {}", transcription);
-        assert!(!transcription.is_empty(), "Transcription should not be empty");
+        assert!(
+            !transcription.is_empty(),
+            "Transcription should not be empty"
+        );
 
         // Step 4: Create ChatMessage (simulates telegram_to_chat_message_with_media)
         let msg = ChatMessage {
@@ -199,8 +226,17 @@ mod tests {
         assert!(formatted.contains("name=\"VoiceUser\""), "Missing username");
 
         // Should have voice transcription with warning note
-        assert!(formatted.contains("<voice-transcription"), "Missing voice tag");
-        assert!(formatted.contains("speech-to-text, may contain errors"), "Missing error note");
-        assert!(formatted.contains(&transcription), "Missing transcription content");
+        assert!(
+            formatted.contains("<voice-transcription"),
+            "Missing voice tag"
+        );
+        assert!(
+            formatted.contains("speech-to-text, may contain errors"),
+            "Missing error note"
+        );
+        assert!(
+            formatted.contains(&transcription),
+            "Missing transcription content"
+        );
     }
 }

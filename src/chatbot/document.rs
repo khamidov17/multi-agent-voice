@@ -47,8 +47,7 @@ pub fn extract_pdf(data: &[u8]) -> Result<String, String> {
     let temp_dir = std::env::temp_dir();
     let input_path = temp_dir.join(format!("doc_input_{}.pdf", std::process::id()));
 
-    std::fs::write(&input_path, data)
-        .map_err(|e| format!("Failed to write temp PDF: {e}"))?;
+    std::fs::write(&input_path, data).map_err(|e| format!("Failed to write temp PDF: {e}"))?;
 
     let output = Command::new("pdftotext")
         .args([input_path.to_str().unwrap(), "-"])
@@ -65,9 +64,7 @@ pub fn extract_pdf(data: &[u8]) -> Result<String, String> {
         return Err(format!("pdftotext failed: {}", stderr));
     }
 
-    let text = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_string();
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     info!("PDF: extracted {} chars", text.len());
     Ok(text)
@@ -76,8 +73,8 @@ pub fn extract_pdf(data: &[u8]) -> Result<String, String> {
 /// Extract text from a DOCX file (which is a ZIP containing word/document.xml).
 fn extract_docx(data: &[u8]) -> Result<String, String> {
     let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| format!("Failed to open DOCX as ZIP: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Failed to open DOCX as ZIP: {e}"))?;
 
     let xml = {
         let mut file = archive
@@ -155,7 +152,7 @@ fn strip_docx_xml(xml: &str) -> String {
 
 /// Extract text from an XLSX/XLS file using the calamine crate.
 fn extract_xlsx(data: &[u8], ext: &str) -> Result<String, String> {
-    use calamine::{open_workbook_from_rs, Xlsx, Xls};
+    use calamine::{Xls, Xlsx, open_workbook_from_rs};
 
     let cursor = Cursor::new(data);
 
@@ -163,13 +160,13 @@ fn extract_xlsx(data: &[u8], ext: &str) -> Result<String, String> {
 
     match ext {
         "xlsx" => {
-            let mut workbook: Xlsx<_> = open_workbook_from_rs(cursor)
-                .map_err(|e| format!("Failed to open XLSX: {e}"))?;
+            let mut workbook: Xlsx<_> =
+                open_workbook_from_rs(cursor).map_err(|e| format!("Failed to open XLSX: {e}"))?;
             append_sheets(&mut workbook, &mut result)?;
         }
         "xls" => {
-            let mut workbook: Xls<_> = open_workbook_from_rs(cursor)
-                .map_err(|e| format!("Failed to open XLS: {e}"))?;
+            let mut workbook: Xls<_> =
+                open_workbook_from_rs(cursor).map_err(|e| format!("Failed to open XLS: {e}"))?;
             append_sheets(&mut workbook, &mut result)?;
         }
         _ => return Err("Unsupported format".to_string()),
