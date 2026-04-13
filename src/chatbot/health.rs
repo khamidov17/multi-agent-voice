@@ -208,8 +208,10 @@ async fn check_cc_subprocess(
         .unwrap_or(false);
 
     if !pid_alive {
-        error!("[health] CC subprocess DEAD — PID {pid} not found for {bot_name}");
-        // No owner alert — Nova monitors logs and handles this autonomously.
+        let msg = format!("[CRITICAL] {bot_name} CC subprocess DEAD — PID {pid} not found");
+        error!("{msg}");
+        // Alert owner for DEAD processes — this is critical, not just stale
+        alert_owner(bot, owner_chat_id, &msg).await;
         return;
     }
 
@@ -221,12 +223,16 @@ async fn check_cc_subprocess(
     }
 
     let age_secs = now_ms.saturating_sub(heartbeat_ms) / 1000;
-    if age_secs > HEARTBEAT_STALE_SECS {
+    if age_secs > 300 {
+        // >5 min stale = CRITICAL — alert owner directly
+        let msg = format!("[CRITICAL] {bot_name} unresponsive for {age_secs}s (PID {pid})");
+        error!("{msg}");
+        alert_owner(bot, owner_chat_id, &msg).await;
+    } else if age_secs > HEARTBEAT_STALE_SECS {
         warn!(
             "[health] CC subprocess STALE — last heartbeat {age_secs}s ago \
              (PID {pid}, bot {bot_name})"
         );
-        // No owner alert ��� logged only. Nova reads logs and handles this.
     } else {
         info!("[health] CC subprocess OK — PID {pid}, heartbeat {age_secs}s ago ({bot_name})");
     }

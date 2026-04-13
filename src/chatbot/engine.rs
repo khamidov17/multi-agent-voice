@@ -1582,12 +1582,29 @@ async fn execute_send_voice(
         let tts = GeminiTtsClient::new(api_key.clone());
         tts.synthesize(text, voice).await?
     } else {
-        return Err("TTS not configured: set tts_endpoint or gemini_api_key".to_string());
+        // Fallback: send as text message when TTS is unavailable
+        warn!("TTS not configured — falling back to text message");
+        let msg_id = telegram
+            .send_message(chat_id, &format!("🔊 {text}"), reply_to_message_id)
+            .await
+            .map_err(|e| format!("TTS fallback failed: {e}"))?;
+        return Ok(Some(format!("Voice unavailable, sent as text (msg_id: {})", msg_id)));
     };
 
-    let msg_id = telegram
+    let msg_id = match telegram
         .send_voice(chat_id, voice_data, None, reply_to_message_id)
-        .await?;
+        .await {
+        Ok(id) => id,
+        Err(e) => {
+            // Fallback: send as text if voice delivery fails
+            warn!("Voice send failed: {e} — falling back to text");
+            return telegram
+                .send_message(chat_id, &format!("🔊 {text}"), reply_to_message_id)
+                .await
+                .map(|id| Some(format!("Voice failed, sent as text (msg_id: {})", id)))
+                .map_err(|e2| format!("Both voice and text failed: {e2}"));
+        }
+    };
 
     Ok(Some(format!(
         "Voice message sent to chat {} (message_id: {})",
@@ -2589,12 +2606,30 @@ You are Nova — the owner's private CTO and system administrator. You have FULL
 - If you need a tool/library that doesn't exist: BUILD IT, then continue your task
 - If something fails: diagnose, fix, retry — don't just report the error and stop
 
+**PRE-FLIGHT CHECK (before starting any task):**
+Before writing code, check dependencies exist:
+- `pip list | grep <package>` or `python3 -c "import <module>"`
+- `which <tool>` for system tools
+- If missing: install with `pip install <package>` FIRST, then start coding
+
 **BUILD WHAT'S MISSING REFLEX:**
 If you need something that doesn't exist:
 - Need a test harness? Build it.
 - Need a data converter? Write it.
 - Need a dependency? Install it.
 - NEVER stop and say "I can't do this because X doesn't exist." Build X, then continue.
+
+**ARTIFACT TRACKING (record what you create):**
+After creating/modifying each file:
+  python3 rag/task_tracker.py --artifact "path/to/file.py" --status done
+When task is complete:
+  python3 rag/task_tracker.py --complete --task "task name" --verdict PASS
+
+**ON STARTUP — read before doing anything:**
+1. Read memories/tasks/current_task.md — resume if mid-task
+2. Read memories/reflections/ — last 3 entries, apply lessons learned
+3. Run `python3 rag/log_experiment.py --summary` — check what was tried
+4. Run `python3 rag/task_tracker.py --show` — check for unfinished artifacts
 
 **CHECKPOINT — save progress after each step:**
 Write to memories/tasks/current_task.md:
@@ -2603,6 +2638,13 @@ Write to memories/tasks/current_task.md:
 - Files created/modified
 - What's next
 This way, even after a restart, you can read this file and resume.
+
+**REFLECTIONS — write after each major task:**
+Write to memories/reflections/{date}.md:
+- What worked well
+- What went wrong
+- What to do differently next time
+These are loaded on next startup so you don't repeat mistakes.
 
 **RULES:**
 - ALWAYS report back to the group when done — never go silent

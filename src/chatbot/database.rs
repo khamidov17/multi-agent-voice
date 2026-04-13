@@ -259,6 +259,17 @@ impl Database {
                 UNIQUE(chat_id, start_message_id)
             );
 
+            -- Generic write-ahead log for crash-safe operations.
+            -- Record intent before action, mark completed after.
+            -- Incomplete entries (completed_at IS NULL) are recovered on startup.
+            CREATE TABLE IF NOT EXISTS pending_ops (
+                id              INTEGER PRIMARY KEY,
+                op_type         TEXT NOT NULL,
+                payload         TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                completed_at    TEXT
+            );
+
             -- Operations: cross-bot heartbeat monitoring
             CREATE TABLE IF NOT EXISTS heartbeats (
                 bot_name        TEXT PRIMARY KEY,

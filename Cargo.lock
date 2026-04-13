@@ -286,6 +286,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "libc",
  "regex",
  "reqwest",
  "rusqlite",

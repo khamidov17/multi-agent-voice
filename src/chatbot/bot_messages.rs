@@ -370,8 +370,11 @@ impl BotMessageDb {
     }
 
     /// Append `this_bot` to the `read_by` list of message `id`.
+    /// Uses BEGIN IMMEDIATE to prevent race conditions when multiple bots
+    /// poll and mark_read within the same 500ms window.
     pub fn mark_read(&self, id: i64, this_bot: &str) -> anyhow::Result<()> {
-        // Fetch current value.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+
         let current: String = self
             .conn
             .query_row(
@@ -380,6 +383,13 @@ impl BotMessageDb {
                 |r| r.get(0),
             )
             .unwrap_or_default();
+
+        // Check if already marked (idempotent)
+        let already = current.split(',').map(str::trim).any(|n| n.eq_ignore_ascii_case(this_bot));
+        if already {
+            self.conn.execute_batch("COMMIT")?;
+            return Ok(());
+        }
 
         let updated = if current.trim().is_empty() {
             this_bot.to_string()
@@ -392,6 +402,7 @@ impl BotMessageDb {
             params![updated, id],
         )?;
 
+        self.conn.execute_batch("COMMIT")?;
         Ok(())
     }
 }
