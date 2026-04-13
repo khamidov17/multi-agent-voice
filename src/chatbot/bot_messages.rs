@@ -56,6 +56,8 @@ pub struct BotHeartbeat {
     pub bot_name: String,
     pub last_heartbeat: String,
     pub iteration_count: i64,
+    pub status: String,
+    pub current_task: Option<String>,
 }
 
 /// Thin wrapper around a `rusqlite::Connection` to the shared bus database.
@@ -97,13 +99,46 @@ impl BotMessageDb {
             CREATE TABLE IF NOT EXISTS heartbeats (
                 bot_name         TEXT    PRIMARY KEY,
                 last_heartbeat   TEXT    NOT NULL,
-                iteration_count  INTEGER NOT NULL DEFAULT 0
+                iteration_count  INTEGER NOT NULL DEFAULT 0,
+                status           TEXT    NOT NULL DEFAULT 'idle',
+                current_task     TEXT
+            );
+
+            -- Shared task board: every agent can see and claim tasks
+            CREATE TABLE IF NOT EXISTS tasks (
+                id               TEXT    PRIMARY KEY,
+                title            TEXT    NOT NULL,
+                status           TEXT    NOT NULL DEFAULT 'pending',
+                assigned_to      TEXT,
+                created_by       TEXT    NOT NULL,
+                created_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+                updated_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+                context          TEXT,
+                result           TEXT,
+                blocked_reason   TEXT,
+                depends_on       TEXT
+            );
+
+            -- Typed handoffs between agents (no NLP trigger needed)
+            CREATE TABLE IF NOT EXISTS handoffs (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_agent       TEXT    NOT NULL,
+                to_agent         TEXT    NOT NULL,
+                task_id          TEXT    NOT NULL,
+                type             TEXT    NOT NULL,
+                payload          TEXT    NOT NULL,
+                status           TEXT    NOT NULL DEFAULT 'pending',
+                created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
             );
 
             CREATE INDEX IF NOT EXISTS idx_bot_messages_to
                 ON bot_messages(to_bot);
             CREATE INDEX IF NOT EXISTS idx_bot_messages_created
-                ON bot_messages(created_at);",
+                ON bot_messages(created_at);
+            CREATE INDEX IF NOT EXISTS idx_tasks_status
+                ON tasks(status);
+            CREATE INDEX IF NOT EXISTS idx_handoffs_to
+                ON handoffs(to_agent, status);",
         )?;
 
         // Migrate: add message_type column if missing (existing DBs).
@@ -121,6 +156,14 @@ impl BotMessageDb {
         // Now create index on message_type (safe — column exists after migration).
         let _ = conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_bot_messages_type ON bot_messages(message_type);",
+        );
+
+        // Migrate: add status + current_task to heartbeats (existing DBs).
+        let _ = conn.execute_batch(
+            "ALTER TABLE heartbeats ADD COLUMN status TEXT NOT NULL DEFAULT 'idle';",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE heartbeats ADD COLUMN current_task TEXT;",
         );
 
         info!("BotMessageDb opened at {}", path.display());
@@ -204,29 +247,45 @@ impl BotMessageDb {
         )
     }
 
-    /// Update the heartbeat for a bot (upsert into heartbeats table).
-    pub fn heartbeat(&self, bot_name: &str) -> anyhow::Result<()> {
+    /// Update the heartbeat for a bot with status (upsert into heartbeats table).
+    /// `status`: idle, working, waiting, blocked
+    /// `current_task`: what the bot is currently doing (None to keep existing)
+    pub fn heartbeat_with_status(
+        &self,
+        bot_name: &str,
+        status: &str,
+        current_task: Option<&str>,
+    ) -> anyhow::Result<()> {
         self.conn.execute(
-            "INSERT INTO heartbeats (bot_name, last_heartbeat, iteration_count)
-             VALUES (?1, datetime('now'), 1)
+            "INSERT INTO heartbeats (bot_name, last_heartbeat, iteration_count, status, current_task)
+             VALUES (?1, datetime('now'), 1, ?2, ?3)
              ON CONFLICT(bot_name) DO UPDATE SET
                  last_heartbeat = datetime('now'),
-                 iteration_count = iteration_count + 1",
-            params![bot_name],
+                 iteration_count = iteration_count + 1,
+                 status = ?2,
+                 current_task = COALESCE(?3, current_task)",
+            params![bot_name, status, current_task],
         )?;
         Ok(())
+    }
+
+    /// Simple heartbeat (backward compatible).
+    pub fn heartbeat(&self, bot_name: &str) -> anyhow::Result<()> {
+        self.heartbeat_with_status(bot_name, "idle", None)
     }
 
     /// Get all heartbeats (for health monitoring).
     pub fn get_heartbeats(&self) -> anyhow::Result<Vec<BotHeartbeat>> {
         let mut stmt = self.conn.prepare(
-            "SELECT bot_name, last_heartbeat, iteration_count FROM heartbeats ORDER BY bot_name",
+            "SELECT bot_name, last_heartbeat, iteration_count, status, current_task FROM heartbeats ORDER BY bot_name",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(BotHeartbeat {
                 bot_name: row.get(0)?,
                 last_heartbeat: row.get(1)?,
                 iteration_count: row.get(2)?,
+                status: row.get::<_, String>(3).unwrap_or_else(|_| "idle".to_string()),
+                current_task: row.get(4).ok(),
             })
         })?;
         let mut result = Vec::new();

@@ -55,28 +55,54 @@ Three agents, one binary (`claudir`), proactive behavior. Each agent drives work
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+## Shared Task Board (data/shared/bot_messages.db)
+
+All agents share three coordination tables beyond the message bus:
+
+### tasks — what's being worked on
+```sql
+tasks (id, title, status, assigned_to, created_by, context, result, blocked_reason, depends_on)
+```
+- Atlas creates tasks, Nova/Sentinel claim them
+- Any agent can query `SELECT * FROM tasks WHERE status='active'` on boot
+- `depends_on` (JSON array of task IDs) enables parallel workstreams
+
+### handoffs — typed triggers between agents
+```sql
+handoffs (from_agent, to_agent, task_id, type, payload, status)
+```
+- Nova writes `{to_agent: 'sentinel', type: 'evaluate', payload: {output_dir: '...'}}` 
+- Sentinel polls for `to_agent='Security' AND status='pending'`
+- No NLP trigger needed — fully typed and reliable
+
+### heartbeats — state-aware supervision
+```sql
+heartbeats (bot_name, last_heartbeat, iteration_count, status, current_task)
+```
+- `status`: idle / working / waiting / blocked
+- Atlas checks: if Nova `status='working'` + recent heartbeat → alive, sleep again
+- If Nova `status='blocked'` → read reason, help or escalate
+- If heartbeat >5min old → dead, alert owner
+
 ## The Proactive Loop
 
 ```
 Owner: "build voice anonymization pipeline"
   │
   ▼
-Atlas: decomposes → assigns Nova → SLEEP 2min
+Atlas: decomposes → creates tasks in DB → assigns Nova → SLEEP 2min
   │
-  ├─ [2 min later] Atlas wakes, checks → Nova still working → SLEEP again
-  ├─ [2 min later] Atlas wakes, checks → Nova reported "done"!
-  │
-  ▼
-Atlas: "Sentinel, evaluate Nova's output at /path/to/output"  → SLEEP 1min
+  ├─ [wake] check heartbeats: Nova status='working' → SLEEP again
+  ├─ [wake] check handoffs: Nova created handoff to Sentinel → verify in progress
   │
   ▼
-Sentinel: runs metrics/run_eval.py → logs to experiments.jsonl
+Sentinel: picks up handoff → runs eval → DIAGNOSES failures (reads code, not just numbers)
   │
-  ├─ PASS: "Atlas, verified — EER 35%, WER 11%, PMOS 3.8. All pass."  → STOP
-  │     └─ Atlas: reports to owner "Project complete! Sentinel verified all metrics pass."
+  ├─ PASS: updates handoff status='done', tells Atlas
+  │     └─ Atlas: reports to owner
   │
-  └─ FAIL: "Nova, EER only 15% (need ≥30%). Try stronger embedding pool."  → SLEEP 2min
-        └─ Nova: fixes → reports again → Sentinel re-evaluates → loop
+  └─ FAIL: reads Nova's code, queries RAG, gives SPECIFIC fix with file:line references
+        └─ Nova: fixes → smoke tests → handoff again → loop
 ```
 
 ## Sleep vs Stop (Critical for Proactivity)
