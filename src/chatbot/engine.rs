@@ -1136,6 +1136,15 @@ async fn execute_tool(
                 }
             }
         }
+        ToolCall::RunScript { path, args, timeout } => {
+            execute_run_script(config, path, args, *timeout).await
+        }
+        ToolCall::DockerRun { compose_file, action } => {
+            execute_docker_run(config, compose_file, action).await
+        }
+        ToolCall::RunEval { vars, all } => {
+            execute_run_eval(vars, *all).await
+        }
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
     };
@@ -2458,6 +2467,144 @@ async fn execute_fetch_url(url: &str) -> Result<Option<String>, String> {
     Ok(Some(result))
 }
 
+/// Execute a script file (run_script tool).
+/// Scripts must be inside workspace/ or scripts/ directory for security.
+async fn execute_run_script(
+    config: &ChatbotConfig,
+    path: &str,
+    args: &[String],
+    timeout: u64,
+) -> Result<Option<String>, String> {
+    // Security: only full_permissions bots can run scripts
+    if !config.full_permissions {
+        return Err("run_script requires full permissions (Tier 1 only)".to_string());
+    }
+
+    // Security: path must be inside workspace/ or scripts/
+    if !path.starts_with("workspace/") && !path.starts_with("scripts/") && !path.starts_with("./workspace/") && !path.starts_with("./scripts/") {
+        return Err("Scripts must be inside workspace/ or scripts/ directory".to_string());
+    }
+
+    let script_path = std::path::Path::new(path);
+    if !script_path.exists() {
+        return Err(format!("Script not found: {path}"));
+    }
+
+    let timeout_secs = timeout.min(300); // cap at 5 min
+    info!("Running script: {} {:?} (timeout={}s)", path, args, timeout_secs);
+
+    let mut cmd = tokio::process::Command::new("bash");
+    cmd.arg(path);
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        cmd.output(),
+    )
+    .await
+    .map_err(|_| format!("Script timed out after {timeout_secs}s"))?
+    .map_err(|e| format!("Failed to run script: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    let result = format!(
+        "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
+        exit_code,
+        if stdout.len() > 4000 { &stdout[..4000] } else { &stdout },
+        if stderr.len() > 2000 { &stderr[..2000] } else { &stderr },
+    );
+
+    Ok(Some(result))
+}
+
+/// Execute Docker compose commands (docker_run tool).
+async fn execute_docker_run(
+    config: &ChatbotConfig,
+    compose_file: &str,
+    action: &str,
+) -> Result<Option<String>, String> {
+    if !config.full_permissions {
+        return Err("docker_run requires full permissions (Tier 1 only)".to_string());
+    }
+
+    let compose_path = std::path::Path::new(compose_file);
+    if !compose_path.exists() {
+        return Err(format!("Compose file not found: {compose_file}"));
+    }
+
+    let args = match action {
+        "up" => vec!["-f", compose_file, "up", "-d"],
+        "down" => vec!["-f", compose_file, "down"],
+        "logs" => vec!["-f", compose_file, "logs", "--tail", "50"],
+        "ps" => vec!["-f", compose_file, "ps"],
+        _ => return Err(format!("Unknown docker action: {action}")),
+    };
+
+    info!("Docker: {} {}", action, compose_file);
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(120),
+        tokio::process::Command::new("docker")
+            .arg("compose")
+            .args(&args)
+            .output(),
+    )
+    .await
+    .map_err(|_| "Docker command timed out")?
+    .map_err(|e| format!("Docker failed: {e}"))?;
+
+    let result = format!(
+        "exit_code: {}\n{}{}",
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    Ok(Some(result))
+}
+
+/// Execute the generic evaluation suite (run_eval tool).
+async fn execute_run_eval(vars: &str, all: bool) -> Result<Option<String>, String> {
+    let mut cmd_args = vec![
+        "rag/eval_runner.py".to_string(),
+    ];
+    if !vars.is_empty() {
+        cmd_args.push("--vars".to_string());
+        cmd_args.push(vars.to_string());
+    }
+    if all {
+        cmd_args.push("--all".to_string());
+    }
+    cmd_args.push("--json".to_string());
+
+    info!("Running eval: python3 {}", cmd_args.join(" "));
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(600),
+        tokio::process::Command::new("python3")
+            .args(&cmd_args)
+            .output(),
+    )
+    .await
+    .map_err(|_| "Evaluation timed out (>600s)")?
+    .map_err(|e| format!("Eval failed: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !stderr.is_empty() && output.status.code() != Some(0) {
+        return Err(format!("Eval error: {}", &stderr[..stderr.len().min(1000)]));
+    }
+
+    Ok(Some(stdout.to_string()))
+}
+
 /// Strip HTML tags and collapse whitespace from HTML content.
 fn strip_html_tags(html: &str) -> String {
     let mut result = String::with_capacity(html.len() / 2);
@@ -2858,13 +3005,24 @@ After each major step, write to memories/tasks/current_task.md:
 - What's next
 This way, even after a restart, you can read this file and resume.
 
+**APPROACH ROTATION — mandatory:**
+- Before assigning a task, ask Sentinel to check experiment history
+- If the same method appears 3+ times with FAIL: REJECT it. Require fundamentally different approach.
+- Nova must explain WHY the new approach differs from failed ones
+- Example: if "HiFi-GAN vocoder" failed 3x, don't accept "HiFi-GAN with different params" — require "Vocos vocoder" or "EnCodec"
+
+**TOOLS REGISTRY:**
+Nova can build new capabilities at runtime. Check workspace/tools/registry.yaml to see what's available.
+Nova uses `run_script` to execute custom scripts and `run_eval` for evaluation.
+
 **RULES:**
 - BE PROACTIVE — drive the loop, don't wait
 - ALWAYS use sleep (not stop) when waiting for teammates
-- ALWAYS ask Sentinel to evaluate before declaring done
+- ALWAYS ask Sentinel to evaluate before declaring done (use run_eval tool or ask Sentinel)
 - NEVER accept "tests pass" without Sentinel's metric report
-- NEVER approve toy algorithms
+- NEVER approve the same approach that failed 3+ times
 - Save task progress to memories/ after each milestone
+- Read data/shared/project.yaml to know current project context
 - ONE message per response — concise and direct{}"#,
             if full_permissions {
                 ""

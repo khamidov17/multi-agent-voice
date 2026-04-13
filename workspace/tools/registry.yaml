@@ -1,0 +1,35 @@
+# Tools Registry — agents discover runtime capabilities here.
+# Nova adds new tools by writing scripts and registering them.
+# Other agents query: "what tools are available?"
+
+tools:
+  - name: voice_eval
+    path: rag/eval_runner.py
+    description: "Run evaluation metrics (EER, WER, PMOS, DER)"
+    created_by: system
+
+  - name: experiment_log
+    path: rag/log_experiment.py
+    description: "Log and query experiment results"
+    created_by: system
+
+  - name: task_tracker
+    path: rag/task_tracker.py
+    description: "Track artifacts and task history"
+    created_by: system
+
+  - name: rag_query
+    path: rag/query.py
+    description: "Query the RAG knowledge base"
+    created_by: system
+
+  - name: rag_index
+    path: rag/index.py
+    description: "Rebuild the RAG knowledge index"
+    created_by: system
+
+# Nova adds new tools here as it builds them:
+# - name: my_new_tool
+#   path: workspace/tools/my_script.py
+#   description: "What it does"
+#   created_by: nova

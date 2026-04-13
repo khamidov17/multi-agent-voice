@@ -6,6 +6,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_script_timeout() -> u64 {
+    60
+}
+
 /// Tool definition for Claude.
 #[derive(Debug, Clone, Serialize)]
 pub struct Tool {
@@ -318,6 +322,37 @@ pub enum ToolCall {
         /// Optional message ID to reply to
         #[serde(skip_serializing_if = "Option::is_none")]
         reply_to_message_id: Option<i64>,
+    },
+
+    /// Run a script from workspace. Nova creates scripts, then executes them.
+    /// Allows agents to build new capabilities at runtime.
+    RunScript {
+        /// Path to script (relative to project root, must be inside workspace/ or scripts/)
+        path: String,
+        /// Optional arguments
+        #[serde(default)]
+        args: Vec<String>,
+        /// Timeout in seconds (default 60, max 300)
+        #[serde(default = "default_script_timeout")]
+        timeout: u64,
+    },
+
+    /// Run a Docker container for isolated execution.
+    DockerRun {
+        /// Path to docker-compose.yml or Dockerfile (relative to project root)
+        compose_file: String,
+        /// Action: "up", "down", "logs", "ps"
+        action: String,
+    },
+
+    /// Run the generic evaluation suite (reads eval_config.yaml).
+    RunEval {
+        /// JSON variables to pass (e.g. {"anon_dir": "/path/to/output"})
+        #[serde(default)]
+        vars: String,
+        /// Run all tests including optional (default: required only)
+        #[serde(default)]
+        all: bool,
     },
 
     /// Signal that processing is complete.
@@ -820,6 +855,42 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                     "severity": { "type": "string", "description": "Severity level: low, medium, high, or critical" }
                 },
                 "required": ["description"]
+            }),
+        },
+        Tool {
+            name: "run_script".to_string(),
+            description: "Execute a script file. Use this to run custom scripts you've created. Scripts must be inside workspace/ or scripts/ directory. Returns stdout/stderr and exit code. Timeout default 60s, max 300s.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to script (relative to project root)" },
+                    "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments to pass" },
+                    "timeout": { "type": "integer", "description": "Timeout in seconds (default 60, max 300)" }
+                },
+                "required": ["path"]
+            }),
+        },
+        Tool {
+            name: "docker_run".to_string(),
+            description: "Manage Docker containers for isolated execution. Actions: 'up' (start), 'down' (stop), 'logs' (view logs), 'ps' (list containers).".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "compose_file": { "type": "string", "description": "Path to docker-compose.yml" },
+                    "action": { "type": "string", "enum": ["up", "down", "logs", "ps"], "description": "Docker action" }
+                },
+                "required": ["compose_file", "action"]
+            }),
+        },
+        Tool {
+            name: "run_eval".to_string(),
+            description: "Run the evaluation suite defined in eval_config.yaml. Returns PASS/FAIL for each test. Sentinel uses this for all project types.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "vars": { "type": "string", "description": "JSON variables: {\"anon_dir\": \"/path\"}" },
+                    "all": { "type": "boolean", "description": "Include optional tests (default: required only)" }
+                }
             }),
         },
         Tool {
