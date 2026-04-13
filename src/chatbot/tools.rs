@@ -10,6 +10,10 @@ fn default_script_timeout() -> u64 {
     60
 }
 
+fn default_summary() -> String {
+    "summary".to_string()
+}
+
 /// Tool definition for Claude.
 #[derive(Debug, Clone, Serialize)]
 pub struct Tool {
@@ -353,6 +357,13 @@ pub enum ToolCall {
         /// Run all tests including optional (default: required only)
         #[serde(default)]
         all: bool,
+    },
+
+    /// Check experiment history — all agents can use this (no Bash needed).
+    CheckExperiments {
+        /// "summary", "view", or a search keyword
+        #[serde(default = "default_summary")]
+        query: String,
     },
 
     /// Signal that processing is complete.
@@ -890,6 +901,16 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "properties": {
                     "vars": { "type": "string", "description": "JSON variables: {\"anon_dir\": \"/path\"}" },
                     "all": { "type": "boolean", "description": "Include optional tests (default: required only)" }
+                }
+            }),
+        },
+        Tool {
+            name: "check_experiments".to_string(),
+            description: "Check experiment history. Use 'summary' to see all methods tried, 'view' for recent entries, or any keyword to search. ALL agents can use this — no Bash needed.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "'summary', 'view', or a search keyword", "default": "summary" }
                 }
             }),
         },

@@ -1145,9 +1145,30 @@ async fn execute_tool(
         ToolCall::RunEval { vars, all } => {
             execute_run_eval(vars, *all).await
         }
+        ToolCall::CheckExperiments { query } => {
+            execute_check_experiments(query).await
+        }
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
     };
+
+    // Auto-save debug state after every tool call (crash recovery)
+    if let Some(ref data_dir) = config.data_dir {
+        let debug_path = data_dir.join("debug_state.json");
+        let tool_name = format!("{:?}", tc.call).chars().take(50).collect::<String>();
+        let result_preview = match &result {
+            Ok(Some(s)) => s.chars().take(200).collect::<String>(),
+            Ok(None) => "null".to_string(),
+            Err(e) => format!("ERROR: {}", e.chars().take(200).collect::<String>()),
+        };
+        let debug_json = serde_json::json!({
+            "last_tool": tool_name,
+            "last_result_preview": result_preview,
+            "is_error": result.is_err(),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+        let _ = std::fs::write(&debug_path, serde_json::to_string_pretty(&debug_json).unwrap_or_default());
+    }
 
     match result {
         Ok(content) => ToolResult {
@@ -2569,6 +2590,77 @@ async fn execute_docker_run(
     Ok(Some(result))
 }
 
+/// Check experiment history (check_experiments tool).
+/// All agents can use this — reads experiments.jsonl directly, no Bash needed.
+async fn execute_check_experiments(query: &str) -> Result<Option<String>, String> {
+    let log_path = std::path::Path::new("data/shared/experiments.jsonl");
+    if !log_path.exists() {
+        return Ok(Some("No experiments logged yet.".to_string()));
+    }
+
+    let content = std::fs::read_to_string(log_path)
+        .map_err(|e| format!("Failed to read experiments: {e}"))?;
+
+    let entries: Vec<serde_json::Value> = content
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    if entries.is_empty() {
+        return Ok(Some("No experiments logged yet.".to_string()));
+    }
+
+    match query {
+        "summary" => {
+            let total = entries.len();
+            let passed = entries.iter().filter(|e| e["verdict"] == "PASS").count();
+            let mut methods: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+            for e in &entries {
+                let method = e["method"].as_str().unwrap_or("unknown").to_string();
+                let entry = methods.entry(method).or_insert((0, 0));
+                if e["verdict"] == "PASS" { entry.0 += 1; } else { entry.1 += 1; }
+            }
+            let mut result = format!("EXPERIMENT SUMMARY\nTotal: {} ({} PASS, {} FAIL)\n\nMethods:\n", total, passed, total - passed);
+            for (method, (p, f)) in &methods {
+                let status = if *p > 0 { "worked" } else { "NEVER passed" };
+                result.push_str(&format!("  [{}P/{}F] {} — {}\n", p, f, method, status));
+            }
+            result.push_str("\nCheck before planning: don't repeat methods that NEVER passed.");
+            Ok(Some(result))
+        }
+        "view" => {
+            let recent: Vec<_> = entries.iter().rev().take(10).collect();
+            let mut result = format!("Last {} experiments:\n\n", recent.len());
+            for e in recent {
+                result.push_str(&format!("[{}] {} — {}\n  Metrics: {}\n\n",
+                    e["verdict"].as_str().unwrap_or("?"),
+                    e["task"].as_str().unwrap_or("?"),
+                    e["method"].as_str().unwrap_or("?"),
+                    e["metrics"],
+                ));
+            }
+            Ok(Some(result))
+        }
+        keyword => {
+            let matches: Vec<_> = entries.iter()
+                .filter(|e| {
+                    let s = serde_json::to_string(e).unwrap_or_default().to_lowercase();
+                    s.contains(&keyword.to_lowercase())
+                })
+                .collect();
+            if matches.is_empty() {
+                Ok(Some(format!("No experiments matching '{keyword}'.")))
+            } else {
+                let mut result = format!("Found {} experiments matching '{keyword}':\n\n", matches.len());
+                for e in &matches {
+                    result.push_str(&format!("[{}] {} — {}\n", e["verdict"].as_str().unwrap_or("?"), e["task"].as_str().unwrap_or("?"), e["method"].as_str().unwrap_or("?")));
+                }
+                Ok(Some(result))
+            }
+        }
+    }
+}
+
 /// Execute the generic evaluation suite (run_eval tool).
 async fn execute_run_eval(vars: &str, all: bool) -> Result<Option<String>, String> {
     let mut cmd_args = vec![
@@ -2762,10 +2854,17 @@ On context compaction or restart, read this file first to resume exactly where y
 - If something fails: diagnose, fix, retry — don't just report the error and stop
 
 **PRE-FLIGHT CHECK (before starting any task):**
-Before writing code, check dependencies exist:
-- `pip list | grep <package>` or `python3 -c "import <module>"`
-- `which <tool>` for system tools
-- If missing: install with `pip install <package>` FIRST, then start coding
+1. Read data/shared/project.yaml — know what project you're working on
+2. Check data/shared/eval_config.yaml — does it match the current task?
+   - If building a voice pipeline but eval_config has web tests → rewrite it for audio metrics
+   - If building a website but eval_config has EER/WER → rewrite it for HTTP/pytest tests
+   - ALWAYS ensure eval_config matches the project before coding
+3. Check dependencies: `pip list | grep <package>` or `which <tool>`
+   - If missing: install FIRST, then start coding
+4. Write workspace/{project}/setup.sh — a script that sets up the project from scratch:
+   - Install dependencies, create directories, download models, etc.
+   - This way the project can be reproduced on any machine
+5. Update project.yaml if the project type changed
 
 **BUILD WHAT'S MISSING REFLEX:**
 If you need something that doesn't exist:
@@ -2822,7 +2921,7 @@ These are loaded on next startup so you don't repeat mistakes.
 
         "Security" => r#"## Your Role: Sentinel — Evaluator & Quality Gate
 
-You are Sentinel, the evaluation and quality gate for ALL voice anonymization work.
+You are Sentinel, the evaluation and quality gate for ALL work the team produces.
 You have Bash, Read, and WebSearch access. You AUTOMATICALLY test everything Nova builds.
 
 **YOUR TOOLS: Bash + Read + WebSearch**
@@ -2834,25 +2933,26 @@ You CANNOT write/edit code (no Write/Edit tools).
 **IMPORTANT: You are NOT WebSearch-only. You HAVE Bash. USE IT DIRECTLY.**
 When you need to run evaluation: use YOUR Bash tool, not Nova's.
 
-**YOUR EVALUATION COMMANDS (exact syntax):**
+**YOUR EVALUATION — TWO MODES:**
 
-Full evaluation (all metrics):
-  cd metrics && python3 run_eval.py --input-key <tsv> --ori-dir <orig_audio> --anon-dir <anon_audio> --ref-file <ref.txt> --out-dir eval_results
+**Mode 1: Generic eval runner (works for ANY project type):**
+  python3 rag/eval_runner.py --vars '{"anon_dir": "/path/to/output"}'
+  This reads data/shared/eval_config.yaml and runs whatever tests are defined there.
+  ALWAYS try this first — it adapts to any project type.
 
-Individual metrics:
-  EER only:  cd metrics && python3 run_eval.py --metrics eer --input-key <tsv> --ori-dir <orig> --anon-dir <anon> --out-dir eval_results
-  WER only:  cd metrics && python3 run_eval.py --metrics wer --anon-dir <anon> --ref-file <ref.txt> --out-dir eval_results
-  PMOS only: cd metrics && python3 run_eval.py --metrics pmos --anon-dir <anon> --out-dir eval_results
-  DER only:  cd metrics && python3 run_eval.py --metrics der --anon-dir <anon> --label-dir <rttm_labels> --out-dir eval_results
+**Mode 2: Voice-specific metrics (when eval_config has audio tests):**
+  cd metrics && python3 run_eval.py --input-key <tsv> --ori-dir <orig> --anon-dir <anon> --out-dir eval_results
+  Individual: --metrics eer, --metrics wer, --metrics pmos, --metrics der
 
-WER produces a word-level comparison table at eval_results/wer/word_comparison.txt showing
-which exact words were transcribed correctly vs incorrectly.
+**Mode 3: Custom testing (web/API projects):**
+  Just use Bash directly: curl, pytest, npm test — whatever eval_config.yaml specifies.
 
-**METRIC THRESHOLDS (hard gates — ALL must pass):**
-  EER  >= 30%  (higher = attacker confused = better anonymization)
-  WER  <= 15%  (lower = speech still intelligible)
-  PMOS >= 3.5  (higher = better voice quality)
-  DER  <= 15%  (lower = better diarization, multi-speaker only)
+**IMPORTANT: Read eval_config.yaml FIRST to know what tests to run.**
+  cat data/shared/eval_config.yaml
+  The tests listed there are authoritative. Run THOSE, not hardcoded metrics.
+
+**Check experiment history before evaluating:**
+  python3 rag/log_experiment.py --summary
 
 **YOU ARE PROACTIVE, NOT REACTIVE.**
 You do NOT wait to be asked. You AUTOMATICALLY act on these triggers:
@@ -2878,15 +2978,14 @@ You do NOT wait to be asked. You AUTOMATICALLY act on these triggers:
 5. Report in this format:
 
 SENTINEL EVALUATION REPORT
+Project: [from project.yaml]
 System: [what was tested]
 
-HARD-GATE METRICS:
-  EER:   {value}%  [PASS/FAIL — target >= 30%]
-  WER:   {value}%  [PASS/FAIL — target <= 15%]
-  PMOS:  {value}   [PASS/FAIL — target >= 3.5]
+TEST RESULTS:
+  [list each test from eval_config.yaml with value and PASS/FAIL]
 
 VERDICT: PASS / FAIL
-Reason: [which metrics passed/failed]
+Reason: [which tests passed/failed]
 
 6. If FAIL — DIAGNOSE before reporting (don't just read numbers):
    a. Read Nova's source code files to understand the implementation
@@ -2992,10 +3091,10 @@ On each wake cycle, check the shared DB heartbeats table:
 - Is the structure clean? (src/, eval/, tests/)
 - Is the testing approach real? (actual audio evidence)
 
-**METRIC THRESHOLDS (Sentinel enforces, you should know):**
-- EER >= 30% (higher = better anonymization)
-- WER <= 15% (lower = better intelligibility)
-- PMOS >= 3.5 (higher = better quality)
+**METRIC THRESHOLDS:**
+Read data/shared/eval_config.yaml for current project's thresholds.
+Sentinel runs those tests — you don't need to know the exact numbers,
+just ensure Sentinel's verdict is PASS before reporting to owner.
 
 **CHECKPOINT — save progress to memory after each milestone:**
 After each major step, write to memories/tasks/current_task.md:
@@ -3009,7 +3108,7 @@ This way, even after a restart, you can read this file and resume.
 - Before assigning a task, ask Sentinel to check experiment history
 - If the same method appears 3+ times with FAIL: REJECT it. Require fundamentally different approach.
 - Nova must explain WHY the new approach differs from failed ones
-- Example: if "HiFi-GAN vocoder" failed 3x, don't accept "HiFi-GAN with different params" — require "Vocos vocoder" or "EnCodec"
+- Example: if method X failed 3x, don't accept "method X with different params" — require a fundamentally different approach
 
 **TOOLS REGISTRY:**
 Nova can build new capabilities at runtime. Check workspace/tools/registry.yaml to see what's available.
@@ -3218,7 +3317,7 @@ You have full admin rights in both. Post, edit, delete, pin freely.
 
 # Your Team — Three-Tier Voice Anonymization Project
 
-You are part of a three-bot team working on voice anonymization. Each bot has a specific role:
+You are part of a three-bot engineering team. Each bot has a specific role:
 
 **Atlas (CEO / Research Lead)** — @atlas_log_bot — user="8446778880"
 - Role: Accepts tasks from owner, assigns specific work to Nova, evaluates results
