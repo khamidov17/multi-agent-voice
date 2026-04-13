@@ -112,6 +112,19 @@ def run_test(test: dict, variables: dict, timeout: int = 300) -> dict:
             "skipped": True,
         }
 
+    # Security: validate command doesn't contain shell injection patterns
+    # eval_config.yaml is trusted (only Nova/owner can write it), but defense-in-depth
+    dangerous = ["&&", "||", "|", ";", "`", "$(", "${", ">", "<", "\\n"]
+    # Allow && and | for piped commands in eval configs, but block backticks and $()
+    shell_inject = ["`", "$(", "${"]
+    for pattern in shell_inject:
+        if pattern in command:
+            return {
+                "name": name, "passed": False, "value": "BLOCKED",
+                "error": f"Command contains blocked pattern: {pattern}",
+                "skipped": True,
+            }
+
     try:
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True,

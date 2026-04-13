@@ -1143,7 +1143,7 @@ async fn execute_tool(
             execute_docker_run(config, compose_file, action).await
         }
         ToolCall::RunEval { vars, all } => {
-            execute_run_eval(vars, *all).await
+            execute_run_eval(config, vars, *all).await
         }
         ToolCall::CheckExperiments { query } => {
             execute_check_experiments(query).await
@@ -1155,11 +1155,14 @@ async fn execute_tool(
     // Auto-save debug state after every tool call (crash recovery)
     if let Some(ref data_dir) = config.data_dir {
         let debug_path = data_dir.join("debug_state.json");
-        let tool_name = format!("{:?}", tc.call).chars().take(50).collect::<String>();
+        // Extract only the tool variant name, not field values (avoids leaking sensitive data)
+        let tool_name = format!("{:?}", tc.call);
+        let tool_name = tool_name.split(|c: char| c == '{' || c == '(').next().unwrap_or("unknown").trim().to_string();
+        // Redact result preview — only show length and success/error, not content
         let result_preview = match &result {
-            Ok(Some(s)) => s.chars().take(200).collect::<String>(),
-            Ok(None) => "null".to_string(),
-            Err(e) => format!("ERROR: {}", e.chars().take(200).collect::<String>()),
+            Ok(Some(s)) => format!("OK ({} chars)", s.len()),
+            Ok(None) => "OK (null)".to_string(),
+            Err(e) => format!("ERROR: {}", e.chars().take(100).collect::<String>()),
         };
         let debug_json = serde_json::json!({
             "last_tool": tool_name,
@@ -2501,14 +2504,25 @@ async fn execute_run_script(
         return Err("run_script requires full permissions (Tier 1 only)".to_string());
     }
 
-    // Security: path must be inside workspace/ or scripts/
-    if !path.starts_with("workspace/") && !path.starts_with("scripts/") && !path.starts_with("./workspace/") && !path.starts_with("./scripts/") {
-        return Err("Scripts must be inside workspace/ or scripts/ directory".to_string());
-    }
-
+    // Security: canonicalize path and verify it's inside workspace/ or scripts/
+    // Prevents ../traversal and symlink escapes.
     let script_path = std::path::Path::new(path);
     if !script_path.exists() {
         return Err(format!("Script not found: {path}"));
+    }
+
+    let canonical = script_path.canonicalize()
+        .map_err(|e| format!("Cannot resolve script path: {e}"))?;
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("Cannot get cwd: {e}"))?;
+    let workspace_dir = cwd.join("workspace").canonicalize().unwrap_or_else(|_| cwd.join("workspace"));
+    let scripts_dir = cwd.join("scripts").canonicalize().unwrap_or_else(|_| cwd.join("scripts"));
+
+    if !canonical.starts_with(&workspace_dir) && !canonical.starts_with(&scripts_dir) {
+        return Err(format!(
+            "Security: script {} resolves to {} which is outside workspace/ and scripts/",
+            path, canonical.display()
+        ));
     }
 
     let timeout_secs = timeout.min(300); // cap at 5 min
@@ -2519,7 +2533,9 @@ async fn execute_run_script(
     for arg in args {
         cmd.arg(arg);
     }
-    cmd.stdout(std::process::Stdio::piped())
+    // Confine script execution to workspace directory
+    cmd.current_dir(&workspace_dir)
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
     let output = tokio::time::timeout(
@@ -2554,9 +2570,20 @@ async fn execute_docker_run(
         return Err("docker_run requires full permissions (Tier 1 only)".to_string());
     }
 
+    // Security: canonicalize and verify compose file is inside workspace/
     let compose_path = std::path::Path::new(compose_file);
     if !compose_path.exists() {
         return Err(format!("Compose file not found: {compose_file}"));
+    }
+    let canonical = compose_path.canonicalize()
+        .map_err(|e| format!("Cannot resolve compose path: {e}"))?;
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let workspace_dir = cwd.join("workspace").canonicalize().unwrap_or_else(|_| cwd.join("workspace"));
+    if !canonical.starts_with(&workspace_dir) {
+        return Err(format!(
+            "Security: compose file must be inside workspace/. {} resolves to {}",
+            compose_file, canonical.display()
+        ));
     }
 
     let args = match action {
@@ -2662,7 +2689,12 @@ async fn execute_check_experiments(query: &str) -> Result<Option<String>, String
 }
 
 /// Execute the generic evaluation suite (run_eval tool).
-async fn execute_run_eval(vars: &str, all: bool) -> Result<Option<String>, String> {
+async fn execute_run_eval(config: &ChatbotConfig, vars: &str, all: bool) -> Result<Option<String>, String> {
+    // Security: only full_permissions or Sentinel (tools_override with Bash) can run eval
+    // Atlas (WebSearch only) must not be able to trigger shell commands
+    if !config.full_permissions && config.bot_name != "Security" {
+        return Err("run_eval requires Bash access (Nova or Sentinel only)".to_string());
+    }
     let mut cmd_args = vec![
         "rag/eval_runner.py".to_string(),
     ];

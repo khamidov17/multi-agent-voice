@@ -159,12 +159,16 @@ impl BotMessageDb {
         );
 
         // Migrate: add status + current_task to heartbeats (existing DBs).
-        let _ = conn.execute_batch(
-            "ALTER TABLE heartbeats ADD COLUMN status TEXT NOT NULL DEFAULT 'idle';",
-        );
-        let _ = conn.execute_batch(
-            "ALTER TABLE heartbeats ADD COLUMN current_task TEXT;",
-        );
+        if conn.prepare("SELECT status FROM heartbeats LIMIT 0").is_err() {
+            let _ = conn.execute_batch(
+                "ALTER TABLE heartbeats ADD COLUMN status TEXT NOT NULL DEFAULT 'idle';",
+            );
+        }
+        if conn.prepare("SELECT current_task FROM heartbeats LIMIT 0").is_err() {
+            let _ = conn.execute_batch(
+                "ALTER TABLE heartbeats ADD COLUMN current_task TEXT;",
+            );
+        }
 
         info!("BotMessageDb opened at {}", path.display());
         Ok(Self { conn })
@@ -456,10 +460,13 @@ impl BotMessageDb {
             format!("{},{}", current, this_bot)
         };
 
-        self.conn.execute(
+        if let Err(e) = self.conn.execute(
             "UPDATE bot_messages SET read_by = ?1 WHERE id = ?2",
             params![updated, id],
-        )?;
+        ) {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            return Err(e.into());
+        }
 
         self.conn.execute_batch("COMMIT")?;
         Ok(())
