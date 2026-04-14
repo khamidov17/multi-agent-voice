@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 // ─── HTTP Probe ──────────────────────────────────────────────────────────
 

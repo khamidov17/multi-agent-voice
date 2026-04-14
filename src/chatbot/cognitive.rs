@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::chatbot::debounce::Debouncer;
 use crate::chatbot::message::ChatMessage;
@@ -29,10 +29,11 @@ const MODES: &[(&str, &str)] = &[
     ),
     (
         "IMPROVE",
-        "Reflect on your recent interactions and decisions. What went well? What could improve? \
+        "Reflect on your recent interactions and decisions. Check: has it been 6+ hours since \
+      your last self-evaluation? If so, call self_evaluate with your honest score and lessons. \
+      If not, write insights to memories/reflections/ with today's date. \
       Check your experiment log: python3 rag/log_experiment.py --view --last 5 \
       Are there patterns in failures? Lessons to document? \
-      Write insights to memories/reflections/ with today's date. \
       If nothing notable, stop quickly.",
     ),
     (

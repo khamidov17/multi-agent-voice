@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[allow(unused_imports)]
 use tracing::{info, warn};
 
 /// Alert generated when a metric crosses a threshold.

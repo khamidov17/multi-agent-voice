@@ -756,6 +756,9 @@ async fn process_messages(
     // Counter for stop rejections — reset each processing turn.
     let mut stop_rejections: u32 = 0;
 
+    // Total tool calls across all iterations — used for post-task reflection trigger.
+    let mut total_tool_call_count: usize = 0;
+
     // Tool call loop — Tier 1 bots get more iterations for code implementation
     let max_iters = if config.full_permissions {
         MAX_ITERATIONS_FULL
@@ -773,6 +776,7 @@ async fn process_messages(
 
         // Execute tool calls (if any — tool_calls is optional with the new schema)
         let mut results = Vec::new();
+        total_tool_call_count += response.tool_calls.len();
         for tc in &response.tool_calls {
             if matches!(tc.call, ToolCall::Done) {
                 // Legacy `done` tool — treat as stop action
@@ -793,6 +797,7 @@ async fn process_messages(
                 _has_sent_response = true;
             }
             info!("🔧 Executing: {:?}", tc.call);
+            let tool_start = std::time::Instant::now();
             let result = tool_dispatch::execute_tool(
                 tc,
                 config,
@@ -803,6 +808,32 @@ async fn process_messages(
                 default_reply_to,
             )
             .await;
+            let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
+            let tool_name = {
+                let raw = format!("{:?}", tc.call);
+                raw.split(|c: char| c == '{' || c == '(')
+                    .next()
+                    .unwrap_or("unknown")
+                    .trim()
+                    .to_string()
+            };
+            metrics.record_tool_call(&tool_name, tool_duration_ms, result.is_error);
+            if crate::chatbot::journal::is_journalable_tool(&tool_name) {
+                let summary = crate::chatbot::journal::auto_journal_summary(
+                    &tool_name,
+                    &format!("{:?}", tc.call),
+                );
+                let db = database.lock().await;
+                let _ = crate::chatbot::journal::add_entry(
+                    db.connection(),
+                    None,
+                    "action",
+                    &summary,
+                    &summary,
+                    &[],
+                    &[],
+                );
+            }
             if let Some(ref content) = result.content {
                 let truncated: String = content.chars().take(100).collect();
                 info!("Result: {}", truncated);
@@ -914,6 +945,37 @@ async fn process_messages(
                     // Save conversation summary to memory files (survives session
                     // resets, compaction, and server migration).
                     prompt_builder::save_conversation_summary(config, database);
+
+                    // Post-task reflection: if this turn had 3+ tool calls and was NOT
+                    // triggered by the cognitive loop, inject a reflect prompt so the bot
+                    // learns from what it just did.
+                    let is_cognitive = messages.iter().any(|m| m.username == "cognitive_loop");
+                    if total_tool_call_count >= 3 && !is_cognitive {
+                        info!(
+                            "Turn had {} tool calls — injecting reflection prompt",
+                            total_tool_call_count
+                        );
+                        let reflect_msg = ChatMessage {
+                            message_id: 0,
+                            chat_id: messages.first().map(|m| m.chat_id).unwrap_or(0),
+                            user_id: 0,
+                            username: "cognitive_loop".to_string(),
+                            first_name: Some("System".to_string()),
+                            timestamp: chrono::Utc::now().format("%H:%M").to_string(),
+                            text: format!(
+                                "[REFLECT] You just completed a turn with {} tool calls. \
+                                 Call `reflect` to log what worked and what didn't. \
+                                 Be specific — your reflections improve future turns.",
+                                total_tool_call_count
+                            ),
+                            reply_to: None,
+                            photo_file_id: None,
+                            image: None,
+                            voice_transcription: None,
+                        };
+                        let mut p = pending.lock().await;
+                        p.push(reflect_msg);
+                    }
 
                     return Ok(());
                 }

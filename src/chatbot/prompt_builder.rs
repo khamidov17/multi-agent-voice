@@ -382,6 +382,9 @@ pub fn system_prompt(
 
     let preloaded_memories = load_startup_memories(config);
 
+    // Load recent reflections so lessons learned are visible on every turn
+    let recent_reflections = load_recent_reflections(config);
+
     // Load conversation summary (survives session resets, compaction, and server migration)
     let conversation_summary = load_conversation_summary(config);
 
@@ -1015,8 +1018,52 @@ When in doubt: plain text. No formatting at all is always better than broken for
 
 {preloaded_memories}
 
+{recent_reflections}
+
 {conversation_summary}"#
     )
+}
+
+/// Load the 3 most recent reflection files from memories/reflections/.
+///
+/// Reflections are written by the bot after major tasks. Injecting them into the
+/// system prompt ensures lessons learned are visible on every restart and turn.
+pub(crate) fn load_recent_reflections(config: &ChatbotConfig) -> String {
+    let Some(ref data_dir) = config.data_dir else {
+        return String::new();
+    };
+    let refl_dir = data_dir.join("memories/reflections");
+    if !refl_dir.is_dir() {
+        return String::new();
+    }
+
+    // Collect all .md files, sort by name (date-named files → chronological order)
+    let mut entries: Vec<_> = match std::fs::read_dir(&refl_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
+            .collect(),
+        Err(_) => return String::new(),
+    };
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    // Sort descending by file name so newest comes first
+    entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    entries.truncate(3);
+
+    let mut out = String::from("# Recent Reflections (last 3 — apply these lessons)\n\n");
+    for entry in &entries {
+        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+            out.push_str(&format!(
+                "## {}\n{}\n\n",
+                entry.file_name().to_string_lossy(),
+                content.trim()
+            ));
+        }
+    }
+    out
 }
 
 /// Read README.md at startup for global context. User files are NOT loaded here —

@@ -44,8 +44,14 @@ mod tests {
         Config {
             owner_ids: std::collections::HashSet::from([teloxide::types::UserId(1)]),
             telegram_bot_token: String::new(),
-            anthropic_api_key: String::new(),
+            bot_name: "Test".to_string(),
+            config_dir: std::path::PathBuf::from("."),
+            full_permissions: false,
+            tools_override: None,
+            owner_dms_only: false,
             gemini_api_key: String::new(),
+            groq_api_key: String::new(),
+            openai_api_key: String::new(),
             allowed_groups: std::collections::HashSet::new(),
             trusted_channels: std::collections::HashSet::new(),
             spam_patterns: vec![
@@ -60,6 +66,16 @@ mod tests {
             whisper_model_path: None,
             tts_endpoint: None,
             premium_users: std::collections::HashSet::new(),
+            live_app_url: None,
+            live_app_port: 3001,
+            ngrok_auth_token: None,
+            live_allowed_users: std::collections::HashSet::new(),
+            yandex_api_key: String::new(),
+            brave_search_api_key: String::new(),
+            dashboard_username: None,
+            dashboard_password: None,
+            cognitive_interval_secs: 0,
+            cognitive_enabled: false,
         }
     }
 
