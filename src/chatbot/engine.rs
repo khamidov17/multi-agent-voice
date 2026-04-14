@@ -27,6 +27,12 @@ const MAX_ITERATIONS: usize = 20;
 /// Maximum tool call iterations for Tier 1 bots (full_permissions) that need to implement code.
 const MAX_ITERATIONS_FULL: usize = 40;
 
+/// Maximum tool call iterations for the quick-response lane (just acknowledge + reply).
+const MAX_ITERATIONS_QUICK: usize = 3;
+
+/// Maximum wall-clock time for the quick-response lane (seconds).
+const MAX_PROCESSING_SECS_QUICK: u64 = 30;
+
 /// Global turn counter for snapshot numbering (monotonically increasing across restarts
 /// within a process lifetime — snapshots also carry timestamps for cross-restart ordering).
 static TURN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -103,14 +109,22 @@ pub struct ChatbotEngine {
     telegram: Arc<TelegramClient>,
     claude: Arc<Mutex<ClaudeCode>>,
     debouncer: Option<Arc<Debouncer>>,
-    /// New messages pending processing.
+    /// New messages pending processing (deep lane).
     pending: Arc<Mutex<Vec<ChatMessage>>>,
-    /// Atomic flag: true while a processing turn is active.
+    /// Atomic flag: true while a deep-lane processing turn is active.
     is_processing: Arc<AtomicBool>,
     /// Direct inject handle — usable without holding the ClaudeCode mutex.
     inject_handle: Arc<std::sync::Mutex<std::sync::mpsc::Sender<String>>>,
     /// Performance metrics collector.
     pub metrics: Arc<crate::chatbot::metrics::MetricsCollector>,
+
+    // ── Quick-response lane (dual-lane processing) ──────────────
+    /// Quick-lane pending messages (separate from deep lane).
+    quick_pending: Arc<Mutex<Vec<ChatMessage>>>,
+    /// Quick-lane processing flag.
+    quick_is_processing: Arc<AtomicBool>,
+    /// Quick-lane debouncer (started lazily in start_debouncer if dual_lane_enabled).
+    quick_debouncer: Option<Arc<Debouncer>>,
 }
 
 impl ChatbotEngine {
@@ -147,6 +161,9 @@ impl ChatbotEngine {
             is_processing: Arc::new(AtomicBool::new(false)),
             inject_handle,
             metrics: Arc::new(crate::chatbot::metrics::MetricsCollector::new()),
+            quick_pending: Arc::new(Mutex::new(Vec::new())),
+            quick_is_processing: Arc::new(AtomicBool::new(false)),
+            quick_debouncer: None,
         }
     }
 
@@ -328,7 +345,9 @@ impl ChatbotEngine {
                         }
                     });
                 } else {
-                    // Already processing — deep lane is busy.
+                    // Already processing — deep lane busy, mid-turn inject these messages.
+                    // With dual-lane enabled, user messages are routed to the quick lane
+                    // before reaching here, so this mostly handles system/bot-to-bot messages.
                     tokio::spawn(async move {
                         let messages = {
                             let mut p = pending.lock().await;
@@ -475,6 +494,11 @@ impl ChatbotEngine {
 
         self.debouncer = Some(debouncer);
 
+        // ── Quick-lane setup (second CC subprocess) ─────────────────────
+        if self.config.dual_lane_enabled {
+            self.start_quick_lane();
+        }
+
         // Resume incomplete tasks from shared DB (spawn as async task)
         let resume_config = self.config.clone();
         let resume_pending = self.pending.clone();
@@ -585,6 +609,111 @@ impl ChatbotEngine {
         }
     }
 
+    /// Start the quick-response lane: a second ClaudeCode subprocess with a minimal
+    /// system prompt, limited tools, and its own debouncer + processing loop.
+    fn start_quick_lane(&mut self) {
+        let quick_prompt =
+            crate::chatbot::dual_lane::quick_lane_system_prompt(&self.config.bot_name);
+
+        // Quick lane uses WebSearch only — no code execution, no memory writes.
+        let quick_tools = Some("WebSearch".to_string());
+
+        let quick_claude = match ClaudeCode::start(
+            quick_prompt,
+            None,  // No session persistence — stateless quick responses
+            false, // Never full_permissions
+            quick_tools,
+        ) {
+            Ok(cc) => Arc::new(Mutex::new(cc)),
+            Err(e) => {
+                error!("Failed to start quick-lane CC subprocess: {e}");
+                return;
+            }
+        };
+
+        info!(
+            "Quick-lane CC subprocess started for {}",
+            self.config.bot_name
+        );
+
+        let context = self.context.clone();
+        let database = self.database.clone();
+        let telegram = self.telegram.clone();
+        let config = self.config.clone();
+        let quick_pending = self.quick_pending.clone();
+        let quick_is_processing = self.quick_is_processing.clone();
+        let metrics = self.metrics.clone();
+
+        let quick_debouncer = Arc::new(Debouncer::new(
+            Duration::from_millis(500), // Quick lane debounces faster (500ms vs 1s)
+            move || {
+                let context = context.clone();
+                let database = database.clone();
+                let telegram = telegram.clone();
+                let config = config.clone();
+                let quick_pending = quick_pending.clone();
+                let quick_is_processing = quick_is_processing.clone();
+                let quick_claude = quick_claude.clone();
+                let metrics = metrics.clone();
+
+                if quick_is_processing
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    tokio::spawn(async move {
+                        let messages = {
+                            let mut p = quick_pending.lock().await;
+                            std::mem::take(&mut *p)
+                        };
+
+                        if messages.is_empty() {
+                            quick_is_processing.store(false, Ordering::SeqCst);
+                            return;
+                        }
+
+                        info!("Quick lane: processing {} message(s)", messages.len());
+
+                        let result = tokio::time::timeout(
+                            tokio::time::Duration::from_secs(MAX_PROCESSING_SECS_QUICK),
+                            process_quick_messages(
+                                &config,
+                                &context,
+                                &database,
+                                &telegram,
+                                &quick_claude,
+                                &messages,
+                                &metrics,
+                            ),
+                        )
+                        .await;
+
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => error!("Quick lane error: {e}"),
+                            Err(_) => {
+                                error!("Quick lane timed out after {}s", MAX_PROCESSING_SECS_QUICK);
+                                let mut cc = quick_claude.lock().await;
+                                let _ = cc.reset().await;
+                            }
+                        }
+
+                        quick_is_processing.store(false, Ordering::SeqCst);
+                    });
+                } else {
+                    // Quick lane already busy — drop messages (they're already stored
+                    // in context/DB, so the deep lane will handle them eventually).
+                    info!("Quick lane busy — messages will be handled by deep lane later");
+                }
+            },
+        ));
+
+        self.quick_debouncer = Some(quick_debouncer);
+        info!(
+            "Dual-lane enabled for {} — quick lane ready",
+            self.config.bot_name
+        );
+    }
+
     /// Handle an incoming message.
     pub async fn handle_message(&self, msg: ChatMessage) {
         info!(
@@ -604,7 +733,27 @@ impl ChatbotEngine {
             store.add_message(msg.clone());
         }
 
-        // Add to pending
+        // Route to the correct lane
+        if self.config.dual_lane_enabled {
+            let deep_is_busy = self.is_processing.load(Ordering::SeqCst);
+            let lane = crate::chatbot::dual_lane::route_message(&msg, deep_is_busy);
+            match lane {
+                crate::chatbot::dual_lane::Lane::Quick => {
+                    info!("🔀 Routing to QUICK lane (deep lane busy)");
+                    let mut p = self.quick_pending.lock().await;
+                    p.push(msg);
+                    if let Some(ref debouncer) = self.quick_debouncer {
+                        debouncer.trigger().await;
+                    }
+                    return;
+                }
+                crate::chatbot::dual_lane::Lane::Deep => {
+                    // Fall through to deep lane below
+                }
+            }
+        }
+
+        // Deep lane (default path)
         {
             let mut p = self.pending.lock().await;
             p.push(msg);
@@ -1181,4 +1330,128 @@ async fn save_turn_snapshot(
     if let Err(e) = crate::chatbot::snapshot::save_snapshot(db.connection(), &snapshot) {
         warn!("Failed to save turn snapshot: {e}");
     }
+}
+
+// ─── Quick-lane processing ──────────────────────────────────────────────
+
+/// Process messages on the quick-response lane.
+///
+/// Much simpler than the deep lane:
+/// - Stateless (no session persistence)
+/// - Limited tools (WebSearch only + MCP send_message)
+/// - Short timeout (30s) and few iterations (3)
+/// - No mid-turn injection, no sleep/heartbeat, no reflection
+async fn process_quick_messages(
+    config: &ChatbotConfig,
+    context: &Mutex<ContextBuffer>,
+    database: &Mutex<Database>,
+    telegram: &TelegramClient,
+    claude: &Mutex<ClaudeCode>,
+    messages: &[ChatMessage],
+    metrics: &Arc<crate::chatbot::metrics::MetricsCollector>,
+) -> Result<(), String> {
+    metrics
+        .messages_processed
+        .fetch_add(messages.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
+    let raw_messages = format::format_messages(messages);
+    info!(
+        "Quick lane: sending {} chars to quick CC",
+        raw_messages.len()
+    );
+
+    // Send typing to all chats
+    for msg in messages {
+        telegram.send_typing(msg.chat_id).await;
+    }
+
+    let mut claude = claude.lock().await;
+    let mut response = claude.send_message(raw_messages).await?;
+
+    let default_reply_to = messages.last().map(|m| m.message_id);
+    let mut memory_files_read: HashSet<String> = HashSet::new();
+
+    for iteration in 0..MAX_ITERATIONS_QUICK {
+        let action = response.action.as_str();
+        info!(
+            "Quick lane: iteration {}, action={}, {} tool call(s)",
+            iteration + 1,
+            action,
+            response.tool_calls.len()
+        );
+
+        // Execute tool calls
+        let mut results = Vec::new();
+        for tc in &response.tool_calls {
+            if matches!(tc.call, ToolCall::Done) {
+                results.push(ToolResult {
+                    tool_use_id: tc.id.clone(),
+                    content: None,
+                    is_error: false,
+                    image: None,
+                });
+                continue;
+            }
+
+            let tool_start = std::time::Instant::now();
+            let result = tool_dispatch::execute_tool(
+                tc,
+                config,
+                context,
+                database,
+                telegram,
+                &mut memory_files_read,
+                default_reply_to,
+            )
+            .await;
+            let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
+            let tool_name = {
+                let raw = format!("{:?}", tc.call);
+                raw.split(['{', '('])
+                    .next()
+                    .unwrap_or("unknown")
+                    .trim()
+                    .to_string()
+            };
+            metrics.record_tool_call(&tool_name, tool_duration_ms, result.is_error);
+            results.push(result);
+        }
+
+        let has_done = response
+            .tool_calls
+            .iter()
+            .any(|tc| matches!(tc.call, ToolCall::Done));
+        let has_error = results.iter().any(|r| r.is_error);
+        let has_results = results.iter().any(|r| r.content.is_some());
+
+        // Stop immediately on stop/done (no sleep, no heartbeat for quick lane)
+        if (has_done || action == "stop") && !has_error && !has_results {
+            if let Some(ref reason) = response.reason {
+                info!("Quick lane stopped: {}", reason);
+            }
+            return Ok(());
+        }
+
+        if results.is_empty() && !has_done {
+            // No tools called — tell CC to respond
+            response = claude
+                .send_tool_results(vec![ToolResult {
+                    tool_use_id: "error".to_string(),
+                    content: Some("Respond with send_message, then action='stop'.".to_string()),
+                    is_error: true,
+                    image: None,
+                }])
+                .await
+                .map_err(|e| format!("Quick lane Claude error: {e}"))?;
+            continue;
+        }
+
+        response = claude
+            .send_tool_results(results)
+            .await
+            .map_err(|e| format!("Quick lane Claude error: {e}"))?;
+    }
+
+    warn!("Quick lane: max iterations reached");
+    Ok(())
 }
