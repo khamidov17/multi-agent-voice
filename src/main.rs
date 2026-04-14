@@ -140,6 +140,8 @@ impl BotState {
                 shared_bot_messages_db: Some(shared_bot_messages_db),
                 cognitive_interval_secs: config.cognitive_interval_secs,
                 cognitive_enabled: config.cognitive_enabled,
+                dual_lane_enabled: config.dual_lane_enabled,
+                quick_lane_model: config.quick_lane_model.clone(),
             };
 
             // Fetch available TTS voices if endpoint configured

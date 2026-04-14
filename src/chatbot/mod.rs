@@ -7,6 +7,7 @@ pub mod context;
 pub mod database;
 pub mod debounce;
 pub mod document;
+pub mod dual_lane;
 pub mod engine;
 pub mod format;
 pub mod gemini;

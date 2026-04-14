@@ -76,6 +76,8 @@ mod tests {
             dashboard_password: None,
             cognitive_interval_secs: 0,
             cognitive_enabled: false,
+            dual_lane_enabled: false,
+            quick_lane_model: None,
         }
     }
 

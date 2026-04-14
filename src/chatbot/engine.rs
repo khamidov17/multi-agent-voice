@@ -59,6 +59,10 @@ pub struct ChatbotConfig {
     pub cognitive_interval_secs: u64,
     /// Whether cognitive loop is enabled.
     pub cognitive_enabled: bool,
+    /// Enable dual-lane processing (deep work + quick response).
+    pub dual_lane_enabled: bool,
+    /// Model override for the quick response lane.
+    pub quick_lane_model: Option<String>,
 }
 
 impl Default for ChatbotConfig {
@@ -81,6 +85,8 @@ impl Default for ChatbotConfig {
             shared_bot_messages_db: None,
             cognitive_interval_secs: 300,
             cognitive_enabled: true,
+            dual_lane_enabled: true,
+            quick_lane_model: None,
         }
     }
 }

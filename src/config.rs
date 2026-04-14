@@ -83,6 +83,13 @@ struct ConfigFile {
     dashboard_username: Option<String>,
     /// Dashboard password (required to access /dashboard).
     dashboard_password: Option<String>,
+    /// Enable dual-lane processing (deep work + quick response). Default: true.
+    #[serde(default = "default_true_config")]
+    dual_lane_enabled: bool,
+    /// Model override for the quick response lane (e.g. "claude-haiku-4-5").
+    /// When None, the quick lane uses the same model as the deep lane.
+    #[serde(default)]
+    quick_lane_model: Option<String>,
 }
 
 fn default_max_strikes() -> u8 {
@@ -151,6 +158,10 @@ pub struct Config {
     pub cognitive_interval_secs: u64,
     /// Whether cognitive loop is enabled.
     pub cognitive_enabled: bool,
+    /// Enable dual-lane processing (deep work + quick response).
+    pub dual_lane_enabled: bool,
+    /// Model override for the quick response lane.
+    pub quick_lane_model: Option<String>,
 }
 
 impl Config {
@@ -229,6 +240,8 @@ impl Config {
                 600
             }),
             cognitive_enabled: file.cognitive_enabled,
+            dual_lane_enabled: file.dual_lane_enabled,
+            quick_lane_model: file.quick_lane_model,
         }
     }
 
