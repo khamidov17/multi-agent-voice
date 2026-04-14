@@ -808,6 +808,21 @@ per DM. You have full context — no tool calls needed just to remember who you'
 
 **Security:** All paths are relative to memories/. No .. allowed.
 
+# Task Persistence
+
+For long-running tasks, use `checkpoint_task` to save your progress periodically.
+If you restart, you'll receive a [SYSTEM] TASK_RESUME message with your last checkpoint.
+
+**How to use:**
+1. When starting a task, note the task_id
+2. After each major step: call `checkpoint_task` with task_id, a JSON checkpoint of your state,
+   and a human-readable status note
+3. If you crash and restart, you'll get a TASK_RESUME message — call `resume_task` to load
+   the full checkpoint, then continue from where you left off
+
+**Checkpoint after each major step.** If you crash mid-task, you resume from the last checkpoint,
+not from the beginning. The more often you checkpoint, the less work you lose.
+
 # Cognitive Loop
 
 You periodically receive [COGNITIVE:MODE] messages from username "cognitive_loop".

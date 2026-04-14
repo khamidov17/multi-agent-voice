@@ -366,6 +366,18 @@ pub enum ToolCall {
         query: String,
     },
 
+    /// Save checkpoint for a task (survives restarts).
+    CheckpointTask {
+        task_id: String,
+        /// Free-form JSON the bot serializes — whatever state it needs to resume
+        checkpoint: String,
+        /// Human-readable note: "Implemented embedding pool, starting vocoder next"
+        status_note: String,
+    },
+
+    /// Load checkpoint for a task (resume after restart).
+    ResumeTask { task_id: String },
+
     /// Signal that processing is complete.
     Done,
 
@@ -912,6 +924,30 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "properties": {
                     "query": { "type": "string", "description": "'summary', 'view', or a search keyword", "default": "summary" }
                 }
+            }),
+        },
+        Tool {
+            name: "checkpoint_task".to_string(),
+            description: "Save your progress on a task. Survives restarts — if you crash, you'll resume from this checkpoint. Call after each major step of a long task.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID" },
+                    "checkpoint": { "type": "string", "description": "JSON state to save (whatever you need to resume)" },
+                    "status_note": { "type": "string", "description": "Human-readable: where you are right now" }
+                },
+                "required": ["task_id", "checkpoint", "status_note"]
+            }),
+        },
+        Tool {
+            name: "resume_task".to_string(),
+            description: "Load the full state of a task including its checkpoint. Use after receiving a TASK_RESUME message to get your saved context back.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID to resume" }
+                },
+                "required": ["task_id"]
             }),
         },
         Tool {

@@ -418,6 +418,103 @@ impl ChatbotEngine {
         }
 
         self.debouncer = Some(debouncer);
+
+        // Resume incomplete tasks from shared DB (spawn as async task)
+        let resume_config = self.config.clone();
+        let resume_pending = self.pending.clone();
+        let resume_debouncer_opt = self.debouncer.clone();
+        tokio::spawn(async move {
+            // Small delay to let debouncer initialize
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            Self::resume_incomplete_tasks_static(
+                &resume_config,
+                &resume_pending,
+                resume_debouncer_opt.as_ref(),
+            )
+            .await;
+        });
+    }
+
+    /// Check for incomplete tasks assigned to this bot and inject resume messages.
+    async fn resume_incomplete_tasks_static(
+        config: &ChatbotConfig,
+        pending: &Arc<Mutex<Vec<ChatMessage>>>,
+        debouncer: Option<&Arc<Debouncer>>,
+    ) {
+        let db_path = match &config.shared_bot_messages_db {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        let db = match crate::chatbot::bot_messages::BotMessageDb::open(&db_path) {
+            Ok(db) => db,
+            Err(e) => {
+                warn!("Could not open shared DB for task resume: {e}");
+                return;
+            }
+        };
+
+        let tasks = match db.get_incomplete_tasks(&config.bot_name) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("Could not query incomplete tasks: {e}");
+                return;
+            }
+        };
+
+        if tasks.is_empty() {
+            return;
+        }
+
+        info!(
+            "Found {} incomplete task(s) to resume for {}",
+            tasks.len(),
+            config.bot_name
+        );
+
+        let mut p = pending.lock().await;
+        for task in &tasks {
+            let checkpoint_info = task
+                .checkpoint_json
+                .as_deref()
+                .unwrap_or("No checkpoint saved");
+
+            let resume_text = format!(
+                "[SYSTEM] TASK_RESUME: You were working on task \"{}\" (id: {}) before restart.\n\
+                 Your last checkpoint: {}\n\
+                 Context: {}\n\
+                 Resume from where you left off. Use resume_task tool to load full context if needed.",
+                task.title,
+                task.id,
+                checkpoint_info,
+                task.context.as_deref().unwrap_or("none"),
+            );
+
+            p.push(ChatMessage {
+                message_id: 0,
+                chat_id: config.primary_chat_id,
+                user_id: 0,
+                username: "task_resume".to_string(),
+                first_name: Some("System".to_string()),
+                timestamp: chrono::Utc::now().format("%H:%M").to_string(),
+                text: resume_text,
+                reply_to: None,
+                photo_file_id: None,
+                image: None,
+                voice_transcription: None,
+            });
+
+            info!(
+                "Injected resume message for task: {} ({})",
+                task.title, task.id
+            );
+        }
+
+        // Trigger debouncer to process the resume messages
+        drop(p); // release lock before triggering
+        if let Some(d) = debouncer {
+            d.trigger().await;
+        }
     }
 
     /// Handle an incoming message.

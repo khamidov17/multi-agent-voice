@@ -317,6 +317,12 @@ pub(crate) async fn execute_tool(
         } => execute_docker_run(config, compose_file, action).await,
         ToolCall::RunEval { vars, all } => execute_run_eval(config, vars, *all).await,
         ToolCall::CheckExperiments { query } => execute_check_experiments(query).await,
+        ToolCall::CheckpointTask {
+            task_id,
+            checkpoint,
+            status_note,
+        } => execute_checkpoint_task(config, task_id, checkpoint, status_note).await,
+        ToolCall::ResumeTask { task_id } => execute_resume_task(config, task_id).await,
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
     };
@@ -2014,4 +2020,65 @@ async fn execute_send_music(
         "Music generated and sent to chat {} (message_id: {}) (prompt: {})",
         chat_id, msg_id, prompt
     )))
+}
+
+/// Save task checkpoint (CheckpointTask tool).
+async fn execute_checkpoint_task(
+    config: &ChatbotConfig,
+    task_id: &str,
+    checkpoint: &str,
+    status_note: &str,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    // Save checkpoint
+    db.checkpoint_task(task_id, checkpoint)
+        .map_err(|e| format!("Checkpoint failed: {e}"))?;
+
+    info!("Checkpoint saved for task {}: {}", task_id, status_note);
+    Ok(Some(format!(
+        "Checkpoint saved for task {}. Status: {}",
+        task_id, status_note
+    )))
+}
+
+/// Load task state for resumption (ResumeTask tool).
+async fn execute_resume_task(
+    config: &ChatbotConfig,
+    task_id: &str,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    let task = db
+        .get_task(task_id)
+        .map_err(|e| format!("Query failed: {e}"))?
+        .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+    let result = serde_json::json!({
+        "id": task.id,
+        "title": task.title,
+        "status": task.status,
+        "assigned_to": task.assigned_to,
+        "context": task.context,
+        "checkpoint": task.checkpoint_json,
+        "error_log": task.error_log,
+        "created_at": task.created_at,
+        "started_at": task.started_at,
+    });
+
+    Ok(Some(
+        serde_json::to_string_pretty(&result).unwrap_or_default(),
+    ))
 }

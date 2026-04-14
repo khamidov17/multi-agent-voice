@@ -60,6 +60,24 @@ pub struct BotHeartbeat {
     pub current_task: Option<String>,
 }
 
+/// A task on the shared task board.
+#[derive(Debug, Clone)]
+pub struct Task {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub assigned_to: Option<String>,
+    pub created_by: String,
+    pub context: Option<String>,
+    pub result: Option<String>,
+    pub plan_id: Option<String>,
+    pub checkpoint_json: Option<String>,
+    pub priority: i32,
+    pub error_log: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+}
+
 /// Thin wrapper around a `rusqlite::Connection` to the shared bus database.
 pub struct BotMessageDb {
     conn: Connection,
@@ -116,7 +134,13 @@ impl BotMessageDb {
                 context          TEXT,
                 result           TEXT,
                 blocked_reason   TEXT,
-                depends_on       TEXT
+                depends_on       TEXT,
+                plan_id          TEXT,
+                checkpoint_json  TEXT,
+                priority         INTEGER NOT NULL DEFAULT 0,
+                started_at       TEXT,
+                completed_at     TEXT,
+                error_log        TEXT
             );
 
             -- Typed handoffs between agents (no NLP trigger needed)
@@ -174,8 +198,206 @@ impl BotMessageDb {
             let _ = conn.execute_batch("ALTER TABLE heartbeats ADD COLUMN current_task TEXT;");
         }
 
+        // Migrate: add new task columns for existing DBs
+        for col in &[
+            "ALTER TABLE tasks ADD COLUMN plan_id TEXT;",
+            "ALTER TABLE tasks ADD COLUMN checkpoint_json TEXT;",
+            "ALTER TABLE tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;",
+            "ALTER TABLE tasks ADD COLUMN started_at TEXT;",
+            "ALTER TABLE tasks ADD COLUMN completed_at TEXT;",
+            "ALTER TABLE tasks ADD COLUMN error_log TEXT;",
+        ] {
+            let _ = conn.execute_batch(col);
+        }
+
         info!("BotMessageDb opened at {}", path.display());
         Ok(Self { conn })
+    }
+
+    // -----------------------------------------------------------------------
+    // Task state machine
+    // -----------------------------------------------------------------------
+
+    /// Create a new task on the shared board.
+    pub fn create_task(
+        &self,
+        id: &str,
+        title: &str,
+        created_by: &str,
+        context: Option<&str>,
+        priority: i32,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO tasks (id, title, created_by, context, priority)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, title, created_by, context, priority],
+        )?;
+        Ok(())
+    }
+
+    /// Claim a task. Returns false if already claimed by another bot.
+    pub fn claim_task(&self, task_id: &str, bot_name: &str) -> anyhow::Result<bool> {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let current_assignee: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT assigned_to FROM tasks WHERE id = ?1",
+                params![task_id],
+                |r| r.get(0),
+            )
+            .ok();
+
+        if let Some(ref assignee) = current_assignee {
+            if !assignee.is_empty() && assignee != bot_name {
+                self.conn.execute_batch("COMMIT")?;
+                return Ok(false);
+            }
+        }
+
+        self.conn.execute(
+            "UPDATE tasks SET assigned_to = ?1, status = 'in_progress', started_at = datetime('now'), updated_at = datetime('now') WHERE id = ?2",
+            params![bot_name, task_id],
+        )?;
+        self.conn.execute_batch("COMMIT")?;
+        Ok(true)
+    }
+
+    /// Save checkpoint state for a task (survives restarts).
+    pub fn checkpoint_task(&self, task_id: &str, checkpoint_json: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET checkpoint_json = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![checkpoint_json, task_id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a task as completed.
+    pub fn complete_task(&self, task_id: &str, result: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET status = 'done', result = ?1, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?2",
+            params![result, task_id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a task as failed and append to error log.
+    pub fn fail_task(&self, task_id: &str, error: &str) -> anyhow::Result<()> {
+        let existing_log: String = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(error_log, '') FROM tasks WHERE id = ?1",
+                params![task_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        let new_log = if existing_log.is_empty() {
+            error.to_string()
+        } else {
+            format!("{}\n---\n{}", existing_log, error)
+        };
+        self.conn.execute(
+            "UPDATE tasks SET status = 'failed', error_log = ?1, updated_at = datetime('now') WHERE id = ?2",
+            params![new_log, task_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get tasks assigned to this bot that are still in progress or blocked.
+    pub fn get_incomplete_tasks(&self, bot_name: &str) -> anyhow::Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, status, assigned_to, created_by, context, result,
+                    plan_id, checkpoint_json, priority, error_log, created_at, started_at
+             FROM tasks
+             WHERE assigned_to = ?1 AND status IN ('in_progress', 'blocked')
+             ORDER BY priority DESC",
+        )?;
+        let rows = stmt.query_map(params![bot_name], |row| {
+            Ok(Task {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                status: row.get(2)?,
+                assigned_to: row.get(3)?,
+                created_by: row.get(4)?,
+                context: row.get(5)?,
+                result: row.get(6)?,
+                plan_id: row.get(7)?,
+                checkpoint_json: row.get(8)?,
+                priority: row.get(9)?,
+                error_log: row.get(10)?,
+                created_at: row.get(11)?,
+                started_at: row.get(12)?,
+            })
+        })?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row?);
+        }
+        Ok(tasks)
+    }
+
+    /// Get unclaimed tasks ordered by priority.
+    pub fn get_pending_tasks_board(&self) -> anyhow::Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, status, assigned_to, created_by, context, result,
+                    plan_id, checkpoint_json, priority, error_log, created_at, started_at
+             FROM tasks
+             WHERE status = 'pending' AND (assigned_to IS NULL OR assigned_to = '')
+             ORDER BY priority DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Task {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                status: row.get(2)?,
+                assigned_to: row.get(3)?,
+                created_by: row.get(4)?,
+                context: row.get(5)?,
+                result: row.get(6)?,
+                plan_id: row.get(7)?,
+                checkpoint_json: row.get(8)?,
+                priority: row.get(9)?,
+                error_log: row.get(10)?,
+                created_at: row.get(11)?,
+                started_at: row.get(12)?,
+            })
+        })?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row?);
+        }
+        Ok(tasks)
+    }
+
+    /// Get a single task by ID.
+    pub fn get_task(&self, task_id: &str) -> anyhow::Result<Option<Task>> {
+        let result = self.conn.query_row(
+            "SELECT id, title, status, assigned_to, created_by, context, result,
+                    plan_id, checkpoint_json, priority, error_log, created_at, started_at
+             FROM tasks WHERE id = ?1",
+            params![task_id],
+            |row| {
+                Ok(Task {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    status: row.get(2)?,
+                    assigned_to: row.get(3)?,
+                    created_by: row.get(4)?,
+                    context: row.get(5)?,
+                    result: row.get(6)?,
+                    plan_id: row.get(7)?,
+                    checkpoint_json: row.get(8)?,
+                    priority: row.get(9)?,
+                    error_log: row.get(10)?,
+                    created_at: row.get(11)?,
+                    started_at: row.get(12)?,
+                })
+            },
+        );
+        match result {
+            Ok(task) => Ok(Some(task)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Insert a new message into the bus.
