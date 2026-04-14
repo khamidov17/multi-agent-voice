@@ -27,6 +27,10 @@ const MAX_ITERATIONS: usize = 20;
 /// Maximum tool call iterations for Tier 1 bots (full_permissions) that need to implement code.
 const MAX_ITERATIONS_FULL: usize = 40;
 
+/// Global turn counter for snapshot numbering (monotonically increasing across restarts
+/// within a process lifetime — snapshots also carry timestamps for cross-restart ordering).
+static TURN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Maximum wall-clock time for Tier 2 chatbots (seconds) — 10 minutes for proactive agents.
 const MAX_PROCESSING_SECS: u64 = 600;
 
@@ -269,56 +273,51 @@ impl ChatbotEngine {
                         // triggers the next processing turn after CC stops.
                         let mut needs_retrigger = false;
 
-                        if let Some(ref db_path) = config.shared_bot_messages_db {
-                            if let Ok(db) =
+                        if let Some(ref db_path) = config.shared_bot_messages_db
+                            && let Ok(db) =
                                 crate::chatbot::bot_messages::BotMessageDb::open(db_path)
-                            {
-                                if let Ok(tasks) = db.pending_tasks_for(&config.bot_name) {
-                                    if !tasks.is_empty() {
-                                        info!(
-                                            "Autonomous continuation: {} pending task(s) for {}",
-                                            tasks.len(),
-                                            config.bot_name
-                                        );
-                                        // Push a synthetic TASK_CONTINUE into pending
-                                        // so the next debouncer turn picks it up.
-                                        let task = &tasks[0];
-                                        let continue_text = format!(
-                                            "[SYSTEM] TASK_CONTINUE: you have {} pending task(s). \
-                                             Next task from {}: {}",
-                                            tasks.len(),
-                                            task.from_bot,
-                                            task.message,
-                                        );
-                                        pending.lock().await.push(
-                                            crate::chatbot::message::ChatMessage {
-                                                message_id: 0,
-                                                chat_id: config.primary_chat_id,
-                                                user_id: 0,
-                                                username: "system".to_string(),
-                                                first_name: Some("System".to_string()),
-                                                timestamp: chrono::Utc::now()
-                                                    .format("%Y-%m-%d %H:%M:%S")
-                                                    .to_string(),
-                                                text: continue_text,
-                                                reply_to: None,
-                                                photo_file_id: None,
-                                                image: None,
-                                                voice_transcription: None,
-                                            },
-                                        );
-                                        needs_retrigger = true;
-                                    }
-                                }
-                            }
+                            && let Ok(tasks) = db.pending_tasks_for(&config.bot_name)
+                            && !tasks.is_empty()
+                        {
+                            info!(
+                                "Autonomous continuation: {} pending task(s) for {}",
+                                tasks.len(),
+                                config.bot_name
+                            );
+                            // Push a synthetic TASK_CONTINUE into pending
+                            // so the next debouncer turn picks it up.
+                            let task = &tasks[0];
+                            let continue_text = format!(
+                                "[SYSTEM] TASK_CONTINUE: you have {} pending task(s). \
+                                 Next task from {}: {}",
+                                tasks.len(),
+                                task.from_bot,
+                                task.message,
+                            );
+                            pending
+                                .lock()
+                                .await
+                                .push(crate::chatbot::message::ChatMessage {
+                                    message_id: 0,
+                                    chat_id: config.primary_chat_id,
+                                    user_id: 0,
+                                    username: "system".to_string(),
+                                    first_name: Some("System".to_string()),
+                                    timestamp: chrono::Utc::now()
+                                        .format("%Y-%m-%d %H:%M:%S")
+                                        .to_string(),
+                                    text: continue_text,
+                                    reply_to: None,
+                                    photo_file_id: None,
+                                    image: None,
+                                    voice_transcription: None,
+                                });
+                            needs_retrigger = true;
                         }
 
                         // Also re-trigger if new messages arrived while saving state.
-                        if !needs_retrigger {
-                            let p = pending.lock().await;
-                            if !p.is_empty() {
-                                needs_retrigger = true;
-                            }
+                        if !needs_retrigger && !pending.lock().await.is_empty() {
+                            needs_retrigger = true;
                         }
 
                         if needs_retrigger {
@@ -329,7 +328,7 @@ impl ChatbotEngine {
                         }
                     });
                 } else {
-                    // Already processing — inject pending messages mid-turn.
+                    // Already processing — deep lane is busy.
                     tokio::spawn(async move {
                         let messages = {
                             let mut p = pending.lock().await;
@@ -340,9 +339,30 @@ impl ChatbotEngine {
                             return;
                         }
 
+                        if config.dual_lane_enabled {
+                            // Dual-lane: send a typing indicator so the user knows
+                            // the bot is alive, then inject into the deep lane so
+                            // messages are not lost.
+                            let has_user_message = messages.iter().any(|m| {
+                                m.user_id > 0
+                                    && m.username != "cognitive_loop"
+                                    && m.username != "task_resume"
+                                    && m.username != "system"
+                            });
+                            if has_user_message {
+                                let chat_id = messages[0].chat_id;
+                                // Only send typing in group chats (negative IDs) to
+                                // avoid noisy ack spam in private chats.
+                                if chat_id < 0 {
+                                    telegram.send_typing(chat_id).await;
+                                }
+                            }
+                        }
+
                         info!(
-                            "Mid-turn inject: {} message(s) while processing",
-                            messages.len()
+                            "Mid-turn inject: {} message(s) while processing (dual_lane={})",
+                            messages.len(),
+                            config.dual_lane_enabled
                         );
                         // Use a continuation prefix so Claude treats this as part of
                         // the ongoing conversation, NOT a brand-new turn.
@@ -444,6 +464,8 @@ impl ChatbotEngine {
                 debouncer.clone(),
                 self.is_processing.clone(),
                 self.config.data_dir.clone(),
+                self.database.clone(),
+                self.metrics.clone(),
             );
             info!(
                 "Cognitive loop started for {} (interval={}s)",
@@ -513,7 +535,7 @@ impl ChatbotEngine {
                 .as_deref()
                 .unwrap_or("No checkpoint saved");
 
-            let resume_text = format!(
+            let mut resume_text = format!(
                 "[SYSTEM] TASK_RESUME: You were working on task \"{}\" (id: {}) before restart.\n\
                  Your last checkpoint: {}\n\
                  Context: {}\n\
@@ -523,6 +545,18 @@ impl ChatbotEngine {
                 checkpoint_info,
                 task.context.as_deref().unwrap_or("none"),
             );
+
+            // Enrich with last turn snapshot (if available)
+            if let Some(ref data_dir) = config.data_dir
+                && let Ok(conn) = rusqlite::Connection::open(data_dir.join("database.db"))
+                && let Some(snap) = crate::chatbot::snapshot::get_last_snapshot(
+                    &std::sync::Mutex::new(conn),
+                    &config.bot_name,
+                )
+            {
+                resume_text.push_str("\n\n");
+                resume_text.push_str(&crate::chatbot::snapshot::format_snapshot_for_resume(&snap));
+            }
 
             p.push(ChatMessage {
                 message_id: 0,
@@ -656,6 +690,7 @@ impl ChatbotEngine {
 }
 
 /// Process pending messages by sending to Claude Code.
+#[allow(clippy::too_many_arguments)]
 async fn process_messages(
     config: &ChatbotConfig,
     context: &Mutex<ContextBuffer>,
@@ -765,6 +800,10 @@ async fn process_messages(
     // Total tool calls across all iterations — used for post-task reflection trigger.
     let mut total_tool_call_count: usize = 0;
 
+    // Snapshot tracking — collect data for automatic turn snapshot
+    let mut tool_calls_log: Vec<String> = Vec::new();
+    let mut messages_sent_log: Vec<(i64, String)> = Vec::new();
+
     // Tool call loop — Tier 1 bots get more iterations for code implementation
     let max_iters = if config.full_permissions {
         MAX_ITERATIONS_FULL
@@ -817,13 +856,23 @@ async fn process_messages(
             let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
             let tool_name = {
                 let raw = format!("{:?}", tc.call);
-                raw.split(|c: char| c == '{' || c == '(')
+                raw.split(['{', '('])
                     .next()
                     .unwrap_or("unknown")
                     .trim()
                     .to_string()
             };
             metrics.record_tool_call(&tool_name, tool_duration_ms, result.is_error);
+            tool_calls_log.push(tool_name.clone());
+            // Track sent messages for snapshot
+            if let ToolCall::SendMessage {
+                chat_id, ref text, ..
+            } = tc.call
+                && !result.is_error
+            {
+                let preview: String = text.chars().take(100).collect();
+                messages_sent_log.push((chat_id, preview));
+            }
             if crate::chatbot::journal::is_journalable_tool(&tool_name) {
                 let summary = crate::chatbot::journal::auto_journal_summary(
                     &tool_name,
@@ -884,8 +933,26 @@ async fn process_messages(
                 if !results.is_empty() && (has_results || has_error) {
                     let _ = claude.send_tool_results(results).await?;
                 }
-                // Sleep
-                tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)).await;
+                // Event-driven sleep: wake immediately on new message, or timeout
+                let has_pending_already = {
+                    let p = pending.lock().await;
+                    !p.is_empty()
+                };
+
+                if !has_pending_already {
+                    let notify =
+                        crate::chatbot::event_bus::global_event_bus().register(&config.bot_name);
+                    tokio::select! {
+                        _ = notify.notified() => {
+                            info!("Woke early — new message arrived for {}", config.bot_name);
+                        }
+                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(sleep_ms)) => {
+                            info!("Sleep timeout reached ({}ms)", sleep_ms);
+                        }
+                    }
+                } else {
+                    info!("Skipping sleep — already have pending messages");
+                }
                 // After waking, check for pending messages and inject them
                 let wake_msg = {
                     let p = pending.lock().await;
@@ -983,6 +1050,19 @@ async fn process_messages(
                         p.push(reflect_msg);
                     }
 
+                    // Auto-snapshot at turn boundary
+                    save_turn_snapshot(
+                        database,
+                        config,
+                        messages,
+                        &tool_calls_log,
+                        total_tool_call_count,
+                        &messages_sent_log,
+                        &response.action,
+                        response.reason.as_deref(),
+                    )
+                    .await;
+
                     return Ok(());
                 }
             }
@@ -1043,5 +1123,62 @@ async fn process_messages(
     }
 
     warn!("Max iterations reached");
+    // Auto-snapshot on max iterations exit
+    save_turn_snapshot(
+        database,
+        config,
+        messages,
+        &tool_calls_log,
+        total_tool_call_count,
+        &messages_sent_log,
+        "max_iterations",
+        None,
+    )
+    .await;
     Ok(())
+}
+
+/// Save an automatic turn snapshot to the bot's local database.
+#[allow(clippy::too_many_arguments)]
+async fn save_turn_snapshot(
+    database: &Mutex<Database>,
+    config: &ChatbotConfig,
+    messages: &[ChatMessage],
+    tool_calls_log: &[String],
+    total_tool_call_count: usize,
+    messages_sent_log: &[(i64, String)],
+    exit_action: &str,
+    exit_reason: Option<&str>,
+) {
+    use crate::chatbot::snapshot::{SnapshotMessage, TurnSnapshot};
+
+    let turn_number = TURN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let snapshot = TurnSnapshot {
+        snapshot_id: uuid::Uuid::new_v4().to_string(),
+        bot_name: config.bot_name.clone(),
+        turn_number,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        trigger_messages: messages
+            .iter()
+            .map(|m| SnapshotMessage {
+                username: m.username.clone(),
+                text_preview: m.text.chars().take(200).collect(),
+                chat_id: m.chat_id,
+            })
+            .collect(),
+        tool_calls_made: tool_calls_log.to_vec(),
+        tool_call_count: total_tool_call_count,
+        messages_sent: messages_sent_log.to_vec(),
+        active_task_id: None, // Extracted from context if available in the future
+        active_plan_id: None,
+        plan_step_index: None,
+        exit_action: exit_action.to_string(),
+        exit_reason: exit_reason.map(|s| s.to_string()),
+    };
+
+    let db = database.lock().await;
+    if let Err(e) = crate::chatbot::snapshot::save_snapshot(db.connection(), &snapshot) {
+        warn!("Failed to save turn snapshot: {e}");
+    }
 }

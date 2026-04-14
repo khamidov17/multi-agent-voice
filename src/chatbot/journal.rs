@@ -203,6 +203,22 @@ pub fn auto_journal_summary(tool_name: &str, key_params: &str) -> String {
     format!("{}: {}", tool_name, params_truncated)
 }
 
+/// Create the journal table schema (used by tests and Database).
+pub fn create_journal_table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS journal (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id     TEXT,
+            entry_type  TEXT NOT NULL,
+            summary     TEXT NOT NULL,
+            detail      TEXT NOT NULL DEFAULT '',
+            participants TEXT NOT NULL DEFAULT '[]',
+            tags        TEXT NOT NULL DEFAULT '[]',
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )
+}
+
 /// Set of tools that should be auto-journaled (state-changing tools).
 pub fn is_journalable_tool(tool_name: &str) -> bool {
     matches!(
@@ -227,4 +243,128 @@ pub fn is_journalable_tool(tool_name: &str) -> bool {
             | "delete_memory"
             | "set_reminder"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> std::sync::Mutex<rusqlite::Connection> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_journal_table(&conn).unwrap();
+        std::sync::Mutex::new(conn)
+    }
+
+    #[test]
+    fn test_add_and_search_entry() {
+        let conn = test_conn();
+        let id = add_entry(
+            &conn,
+            Some("task-1"),
+            "action",
+            "Deployed v2.0",
+            "Full deployment of version 2.0 to production",
+            &["Nova".to_string()],
+            &["deploy".to_string(), "prod".to_string()],
+        )
+        .unwrap();
+        assert!(id > 0);
+
+        let results = search_journal(&conn, "deploy", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].summary, "Deployed v2.0");
+        assert_eq!(results[0].task_id, Some("task-1".to_string()));
+    }
+
+    #[test]
+    fn test_get_journal_for_task() {
+        let conn = test_conn();
+        add_entry(&conn, Some("t1"), "action", "Step 1", "d1", &[], &[]).unwrap();
+        add_entry(&conn, Some("t1"), "action", "Step 2", "d2", &[], &[]).unwrap();
+        add_entry(&conn, Some("t2"), "action", "Other", "d3", &[], &[]).unwrap();
+
+        let entries = get_journal_for_task(&conn, "t1");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].summary, "Step 1");
+        assert_eq!(entries[1].summary, "Step 2");
+    }
+
+    #[test]
+    fn test_is_journalable_tool() {
+        assert!(is_journalable_tool("send_message"));
+        assert!(is_journalable_tool("ban_user"));
+        assert!(is_journalable_tool("create_plan"));
+        assert!(is_journalable_tool("build_tool"));
+        // Non-state-changing tools should not be journaled
+        assert!(!is_journalable_tool("query"));
+        assert!(!is_journalable_tool("get_metrics"));
+        assert!(!is_journalable_tool("read_memory"));
+        assert!(!is_journalable_tool("list_tools"));
+    }
+
+    #[test]
+    fn test_compress_old_entries() {
+        let conn = test_conn();
+        // Insert an entry with a past date
+        {
+            let c = conn.lock().unwrap();
+            c.execute(
+                "INSERT INTO journal (task_id, entry_type, summary, detail, created_at)
+                 VALUES ('t1', 'action', 'old summary', 'long old detail text', datetime('now', '-10 days'))",
+                [],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO journal (task_id, entry_type, summary, detail)
+                 VALUES ('t1', 'action', 'new summary', 'new detail text')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Compress entries older than 7 days
+        let count = compress_old_entries(&conn, 7).unwrap();
+        assert_eq!(count, 1);
+
+        // Verify old entry's detail = summary
+        let c = conn.lock().unwrap();
+        let (summary, detail): (String, String) = c
+            .query_row(
+                "SELECT summary, detail FROM journal ORDER BY id ASC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(summary, "old summary");
+        assert_eq!(detail, "old summary"); // compressed
+    }
+
+    #[test]
+    fn test_format_task_timeline() {
+        let entries = vec![
+            JournalEntry {
+                id: 1,
+                task_id: Some("t1".into()),
+                entry_type: "action".into(),
+                summary: "Did thing".into(),
+                detail: String::new(),
+                participants: vec![],
+                tags: vec![],
+                created_at: "2025-01-01 10:00:00".into(),
+            },
+            JournalEntry {
+                id: 2,
+                task_id: Some("t1".into()),
+                entry_type: "observation".into(),
+                summary: "Saw result".into(),
+                detail: String::new(),
+                participants: vec![],
+                tags: vec![],
+                created_at: "2025-01-01 10:05:00".into(),
+            },
+        ];
+        let timeline = format_task_timeline(&entries);
+        assert!(timeline.contains("action: Did thing"));
+        assert!(timeline.contains("observation: Saw result"));
+    }
 }

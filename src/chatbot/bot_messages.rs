@@ -106,6 +106,18 @@ pub struct ConsensusRequest {
     pub created_at: String,
 }
 
+/// A single entry in the progress audit ledger.
+#[derive(Debug, Clone)]
+pub struct LedgerEntry {
+    pub id: i64,
+    pub task_id: String,
+    pub agent: String,
+    pub action: String,
+    pub detail: Option<String>,
+    pub consensus_id: Option<i64>,
+    pub created_at: String,
+}
+
 /// Status of a consensus request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConsensusStatus {
@@ -227,19 +239,31 @@ impl BotMessageDb {
                 timeout_minutes    INTEGER NOT NULL DEFAULT 10,
                 created_at         TEXT    NOT NULL DEFAULT (datetime('now')),
                 resolved_at        TEXT
-            );",
+            );
+
+            -- Immutable audit trail: every proposed, approved, executed, verified step
+            CREATE TABLE IF NOT EXISTS progress_ledger (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id       TEXT    NOT NULL,
+                agent         TEXT    NOT NULL,
+                action        TEXT    NOT NULL,
+                detail        TEXT,
+                consensus_id  INTEGER,
+                created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_ledger_task ON progress_ledger(task_id);",
         )?;
 
         // Migrate: add message_type column if missing (existing DBs).
         let has_message_type: bool = conn
             .prepare("SELECT message_type FROM bot_messages LIMIT 0")
             .is_ok();
-        if !has_message_type {
-            if let Err(e) = conn.execute_batch(
+        if !has_message_type
+            && let Err(e) = conn.execute_batch(
                 "ALTER TABLE bot_messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'chat';",
-            ) {
-                warn!("Migration: message_type column may already exist: {e}");
-            }
+            )
+        {
+            warn!("Migration: message_type column may already exist: {e}");
         }
 
         // Now create index on message_type (safe — column exists after migration).
@@ -312,11 +336,12 @@ impl BotMessageDb {
             )
             .ok();
 
-        if let Some(ref assignee) = current_assignee {
-            if !assignee.is_empty() && assignee != bot_name {
-                self.conn.execute_batch("COMMIT")?;
-                return Ok(false);
-            }
+        if let Some(ref assignee) = current_assignee
+            && !assignee.is_empty()
+            && assignee != bot_name
+        {
+            self.conn.execute_batch("COMMIT")?;
+            return Ok(false);
         }
 
         self.conn.execute(
@@ -749,6 +774,50 @@ impl BotMessageDb {
         Ok(count as u64)
     }
 
+    // -----------------------------------------------------------------------
+    // Progress ledger
+    // -----------------------------------------------------------------------
+
+    /// Append an entry to the immutable progress audit ledger.
+    pub fn log_progress(
+        &self,
+        task_id: &str,
+        agent: &str,
+        action: &str,
+        detail: Option<&str>,
+        consensus_id: Option<i64>,
+    ) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO progress_ledger (task_id, agent, action, detail, consensus_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![task_id, agent, action, detail, consensus_id],
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve all ledger entries for a task, ordered chronologically.
+    pub fn get_task_progress(&self, task_id: &str) -> anyhow::Result<Vec<LedgerEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, agent, action, detail, consensus_id, created_at \
+             FROM progress_ledger WHERE task_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![task_id], |row| {
+            Ok(LedgerEntry {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                agent: row.get(2)?,
+                action: row.get(3)?,
+                detail: row.get(4)?,
+                consensus_id: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
+    }
+
     /// Insert a new message into the bus.
     ///
     /// Call this after successfully sending a Telegram message so peer bots
@@ -794,6 +863,11 @@ impl BotMessageDb {
                 telegram_msg_id
             ],
         )?;
+        // Cross-process notification: touch a wake file so the target bot's
+        // polling loop wakes its sleeping CC turn via the event bus.
+        if let Some(target) = to_bot {
+            crate::chatbot::event_bus::touch_wake_file(target);
+        }
         Ok(self.conn.last_insert_rowid())
     }
 
@@ -1138,6 +1212,8 @@ pub fn start_polling(
 
             // Single trigger for the entire batch.
             debouncer.trigger().await;
+            // Wake the event bus so any sleeping CC turn exits immediately.
+            crate::chatbot::event_bus::global_event_bus().wake(&this_bot);
         }
     });
 }

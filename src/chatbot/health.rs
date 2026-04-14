@@ -405,33 +405,39 @@ pub fn build_status_report(
     }
 
     // Cross-bot heartbeats
-    if let Some(db_path) = shared_db {
-        if db_path.exists() {
-            if let Ok(conn) = rusqlite::Connection::open(db_path) {
-                if let Ok(mut stmt) = conn.prepare(
-                    "SELECT bot_name, last_heartbeat, iteration_count FROM heartbeats ORDER BY bot_name",
-                ) {
-                    lines.push("--- Peer Heartbeats ---".to_string());
-                    if let Ok(rows) = stmt.query_map([], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, i64>(2)?,
-                        ))
-                    }) {
-                        for row in rows.flatten() {
-                            let (name, ts, iters) = row;
-                            let age = parse_sqlite_datetime_age_secs(&ts)
-                                .map(|a| format!("{}s ago", a))
-                                .unwrap_or_else(|| "unknown".to_string());
-                            let status = parse_sqlite_datetime_age_secs(&ts)
-                                .map(|a| if a > CROSSBOT_STALE_SECS { "STALE" } else { "OK" })
-                                .unwrap_or("?");
-                            lines.push(format!("  {} [{}]: {} (iters: {})", name, status, age, iters));
-                        }
+    if let Some(db_path) = shared_db
+        && db_path.exists()
+        && let Ok(conn) = rusqlite::Connection::open(db_path)
+        && let Ok(mut stmt) = conn.prepare(
+            "SELECT bot_name, last_heartbeat, iteration_count FROM heartbeats ORDER BY bot_name",
+        )
+        && let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+    {
+        lines.push("--- Peer Heartbeats ---".to_string());
+        for row in rows.flatten() {
+            let (name, ts, iters) = row;
+            let age = parse_sqlite_datetime_age_secs(&ts)
+                .map(|a| format!("{}s ago", a))
+                .unwrap_or_else(|| "unknown".to_string());
+            let status = parse_sqlite_datetime_age_secs(&ts)
+                .map(|a| {
+                    if a > CROSSBOT_STALE_SECS {
+                        "STALE"
+                    } else {
+                        "OK"
                     }
-                }
-            }
+                })
+                .unwrap_or("?");
+            lines.push(format!(
+                "  {} [{}]: {} (iters: {})",
+                name, status, age, iters
+            ));
         }
     }
 

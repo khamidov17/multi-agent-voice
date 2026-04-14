@@ -97,3 +97,88 @@ pub fn validate_tool_name(name: &str) -> bool {
         && name.len() <= 64
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_tool_name() {
+        assert!(validate_tool_name("my_tool_123"));
+        assert!(validate_tool_name("simple"));
+        assert!(validate_tool_name("a"));
+        assert!(validate_tool_name("CamelCase"));
+        // Invalid names
+        assert!(!validate_tool_name(""));
+        assert!(!validate_tool_name("../evil"));
+        assert!(!validate_tool_name("has spaces"));
+        assert!(!validate_tool_name("has-dashes"));
+        assert!(!validate_tool_name("has.dots"));
+        let long_name = "a".repeat(65);
+        assert!(!validate_tool_name(&long_name));
+        // 64 chars is fine
+        let max_name = "a".repeat(64);
+        assert!(validate_tool_name(&max_name));
+    }
+
+    #[test]
+    fn test_register_and_find_tool() {
+        let dir = std::env::temp_dir().join("tool_reg_test");
+        let _ = std::fs::create_dir_all(dir.join("tools"));
+
+        let entry = ToolRegistryEntry {
+            name: "test_tool".into(),
+            path: "/usr/bin/echo".into(),
+            description: "A test tool".into(),
+            created_by: "Nova".into(),
+            parameters_json: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        register_tool(&dir, entry).unwrap();
+
+        let found = find_tool(&dir, "test_tool");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().description, "A test tool");
+
+        // Case-insensitive lookup
+        assert!(find_tool(&dir, "TEST_TOOL").is_some());
+
+        // Non-existent
+        assert!(find_tool(&dir, "nonexistent").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_register_replaces_existing() {
+        let dir = std::env::temp_dir().join("tool_reg_replace");
+        let _ = std::fs::create_dir_all(dir.join("tools"));
+
+        let entry1 = ToolRegistryEntry {
+            name: "my_tool".into(),
+            path: "/v1".into(),
+            description: "Version 1".into(),
+            created_by: "Nova".into(),
+            parameters_json: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        register_tool(&dir, entry1).unwrap();
+
+        let entry2 = ToolRegistryEntry {
+            name: "my_tool".into(),
+            path: "/v2".into(),
+            description: "Version 2".into(),
+            created_by: "Nova".into(),
+            parameters_json: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        register_tool(&dir, entry2).unwrap();
+
+        let tools = load_registry(&dir);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].description, "Version 2");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

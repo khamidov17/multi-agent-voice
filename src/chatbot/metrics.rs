@@ -55,8 +55,8 @@ pub struct MetricsCollector {
     pub tool_stats: Mutex<HashMap<String, ToolStats>>,
 }
 
-impl MetricsCollector {
-    pub fn new() -> Self {
+impl Default for MetricsCollector {
+    fn default() -> Self {
         Self {
             messages_processed: AtomicU64::new(0),
             tool_calls_total: AtomicU64::new(0),
@@ -68,6 +68,12 @@ impl MetricsCollector {
             errors_total: AtomicU64::new(0),
             tool_stats: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+impl MetricsCollector {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Record a tool call (success or failure).
@@ -281,4 +287,93 @@ pub fn format_metrics_summary(snapshots: &[MetricsSnapshot]) -> String {
         ));
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_record_tool_call_updates_stats() {
+        let mc = MetricsCollector::new();
+        mc.record_tool_call("send_message", 150, false);
+        mc.record_tool_call("send_message", 200, false);
+        mc.record_tool_call("send_message", 100, true);
+
+        assert_eq!(mc.tool_calls_total.load(Ordering::Relaxed), 3);
+        assert_eq!(mc.tool_calls_failed.load(Ordering::Relaxed), 1);
+        assert_eq!(mc.tool_call_duration_ms.load(Ordering::Relaxed), 450);
+
+        let stats = mc.tool_stats.lock().unwrap();
+        let sm = stats.get("send_message").unwrap();
+        assert_eq!(sm.calls, 3);
+        assert_eq!(sm.failures, 1);
+        assert_eq!(sm.total_ms, 450);
+    }
+
+    #[test]
+    fn test_flush_resets_counters() {
+        let mc = MetricsCollector::new();
+        mc.record_tool_call("query", 50, false);
+        mc.record_tool_call("query", 30, false);
+        mc.messages_processed.store(10, Ordering::Relaxed);
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metrics_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                messages_processed INTEGER, tool_calls_total INTEGER,
+                tool_calls_failed INTEGER, avg_tool_latency_ms INTEGER,
+                cc_turns_total INTEGER, cc_turns_timed_out INTEGER,
+                spam_detected INTEGER, errors_total INTEGER,
+                tool_stats_json TEXT
+            );",
+        )
+        .unwrap();
+
+        mc.flush_to_db(&conn).unwrap();
+
+        // Counters should be reset to 0
+        assert_eq!(mc.tool_calls_total.load(Ordering::Relaxed), 0);
+        assert_eq!(mc.messages_processed.load(Ordering::Relaxed), 0);
+
+        // DB should have one snapshot
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM metrics_snapshots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_check_thresholds_fires_on_high_failure_rate() {
+        let mc = MetricsCollector::new();
+        // 10 calls, 5 failed = 50% failure rate (threshold is 20%)
+        for _ in 0..5 {
+            mc.record_tool_call("test", 100, false);
+        }
+        for _ in 0..5 {
+            mc.record_tool_call("test", 100, true);
+        }
+
+        let alerts = mc.check_thresholds();
+        assert!(!alerts.is_empty(), "Expected alerts for 50% failure rate");
+        assert!(alerts.iter().any(|a| a.metric == "tool_failure_rate"));
+    }
+
+    #[test]
+    fn test_check_thresholds_no_alerts_when_healthy() {
+        let mc = MetricsCollector::new();
+        for _ in 0..10 {
+            mc.record_tool_call("test", 100, false);
+        }
+        let alerts = mc.check_thresholds();
+        assert!(alerts.is_empty(), "Expected no alerts for healthy metrics");
+    }
+
+    #[test]
+    fn test_format_metrics_summary_empty() {
+        let s = format_metrics_summary(&[]);
+        assert_eq!(s, "No metrics data yet.");
+    }
 }

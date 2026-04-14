@@ -7,16 +7,21 @@
 //! if the engine is busy, the cognitive tick is skipped.
 //!
 //! Modes rotate: MONITOR → IMPROVE → MAINTAIN → EXPLORE → repeat.
+//!
+//! MONITOR and IMPROVE modes auto-inject metrics/self-eval data into the prompt
+//! so the agent doesn't have to query them manually.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
+use crate::chatbot::database::Database;
 use crate::chatbot::debounce::Debouncer;
 use crate::chatbot::message::ChatMessage;
+use crate::chatbot::metrics::MetricsCollector;
 
 /// Cognitive modes that rotate each tick.
 const MODES: &[(&str, &str)] = &[
@@ -43,6 +48,8 @@ const MODES: &[(&str, &str)] = &[
       Are there pending handoffs that nobody picked up? \
       Are there overdue reminders? \
       Check data/shared/artifacts.json — any in_progress items that seem abandoned? \
+      Clean up turn snapshots older than 48 hours (keep the last 50) — \
+      use get_snapshots to review, then they auto-expire. \
       Take action on anything stale. If all clean, stop quickly.",
     ),
     (
@@ -74,6 +81,9 @@ struct CognitiveState {
 /// * `debouncer` — triggers processing after injecting cognitive message
 /// * `is_processing` — atomic flag; if true, skip this tick (user messages have priority)
 /// * `data_dir` — path to bot's data directory (for state file)
+/// * `database` — bot's local database (for metrics/self-eval queries)
+/// * `metrics` — in-memory metrics collector (for threshold checks)
+#[allow(clippy::too_many_arguments)]
 pub fn start_cognitive_loop(
     bot_name: String,
     interval_secs: u64,
@@ -82,6 +92,8 @@ pub fn start_cognitive_loop(
     debouncer: Arc<Debouncer>,
     is_processing: Arc<AtomicBool>,
     data_dir: Option<PathBuf>,
+    database: Arc<Mutex<Database>>,
+    metrics: Arc<MetricsCollector>,
 ) {
     tokio::spawn(async move {
         // Wait 60 seconds after startup before first cognitive tick
@@ -131,11 +143,16 @@ pub fn start_cognitive_loop(
                 mode_name
             );
 
+            // Build mode-specific extra context by querying metrics/self-eval.
+            // Use try_lock() — if the DB is contended, skip injection for this tick.
+            let extra_context =
+                build_extra_context(mode_name, &bot_name, &database, &metrics).await;
+
             // Build the cognitive message
             let now = chrono::Utc::now().format("%H:%M").to_string();
             let full_prompt = format!(
-                "[COGNITIVE:{}] {}\n\nBot: {}. Be concise — if nothing needs attention, stop quickly.",
-                mode_name, mode_prompt, bot_name
+                "[COGNITIVE:{}] {}\n\nBot: {}. Be concise — if nothing needs attention, stop quickly.{}",
+                mode_name, mode_prompt, bot_name, extra_context
             );
 
             let cognitive_msg = ChatMessage {
@@ -170,4 +187,113 @@ pub fn start_cognitive_loop(
             }
         }
     });
+}
+
+/// Build mode-specific extra context to inject into the cognitive prompt.
+///
+/// Uses try_lock() on the database — if contended, returns empty string
+/// rather than blocking the cognitive tick.
+async fn build_extra_context(
+    mode_name: &str,
+    bot_name: &str,
+    database: &Arc<Mutex<Database>>,
+    metrics: &Arc<MetricsCollector>,
+) -> String {
+    match mode_name {
+        "MONITOR" => {
+            // Inject recent metrics snapshot + alerts + orchestrator hint for Nova
+            let metrics_ctx = build_monitor_context(database, metrics).await;
+            let nova_hint = if bot_name == "Nova" {
+                "\n\nRun orchestrator_status to see the full picture of what all agents are working on."
+            } else {
+                ""
+            };
+            if metrics_ctx.is_empty() && nova_hint.is_empty() {
+                String::new()
+            } else {
+                format!("{}{}", metrics_ctx, nova_hint)
+            }
+        }
+        "IMPROVE" => {
+            // Check if self-evaluation is due and inject eval data
+            build_improve_context(database).await
+        }
+        _ => String::new(),
+    }
+}
+
+/// Build MONITOR context: recent metrics snapshots + threshold alerts.
+async fn build_monitor_context(
+    database: &Arc<Mutex<Database>>,
+    metrics: &Arc<MetricsCollector>,
+) -> String {
+    // Try to get metrics snapshots from DB — don't block if contended
+    let db_guard = match database.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            warn!("[cognitive] Skipping metrics injection (DB lock contended)");
+            return String::new();
+        }
+    };
+
+    let conn = db_guard.connection();
+    let conn_guard = match conn.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            warn!("[cognitive] Skipping metrics injection (conn lock contended)");
+            return String::new();
+        }
+    };
+
+    let snapshots = crate::chatbot::metrics::get_recent_snapshots(&conn_guard, 3);
+    // Drop locks before doing string work
+    drop(conn_guard);
+    drop(db_guard);
+
+    // Check in-memory threshold alerts (no DB lock needed — atomics)
+    let alerts = metrics.check_thresholds();
+
+    if snapshots.is_empty() && alerts.is_empty() {
+        return String::new();
+    }
+
+    let mut ctx = String::from("\n\n--- METRICS DATA (auto-injected) ---\n");
+    ctx.push_str(&crate::chatbot::metrics::format_metrics_summary(&snapshots));
+
+    if !alerts.is_empty() {
+        ctx.push_str("\n\nALERTS:\n");
+        for alert in &alerts {
+            ctx.push_str(&format!("- [{}] {}\n", alert.severity, alert.message));
+        }
+    }
+
+    ctx
+}
+
+/// Build IMPROVE context: self-evaluation data if 6+ hours since last eval.
+async fn build_improve_context(database: &Arc<Mutex<Database>>) -> String {
+    // Try to get DB access — don't block if contended
+    let db_guard = match database.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            warn!("[cognitive] Skipping self-eval injection (DB lock contended)");
+            return String::new();
+        }
+    };
+
+    let conn = db_guard.connection();
+
+    if crate::chatbot::self_eval::should_evaluate(conn) {
+        let data = crate::chatbot::self_eval::compute_eval_data(conn);
+        // Drop lock before string formatting
+        drop(db_guard);
+
+        let eval_prompt = crate::chatbot::self_eval::format_eval_prompt(&data);
+        format!(
+            "\n\n--- SELF-EVALUATION DATA (auto-injected) ---\n{}",
+            eval_prompt
+        )
+    } else {
+        String::new()
+    }
 }

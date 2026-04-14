@@ -191,17 +191,17 @@ impl BotState {
             });
             if !has_existing_session {
                 let db_path = config.data_dir.join("database.db");
-                if db_path.exists() {
-                    if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                        let history = build_history_context(&conn, 50);
-                        if !history.is_empty() {
-                            info!(
-                                "📜 No existing session — injecting {} chars of message history",
-                                history.len()
-                            );
-                            prompt.push_str("\n\n");
-                            prompt.push_str(&history);
-                        }
+                if db_path.exists()
+                    && let Ok(conn) = rusqlite::Connection::open(&db_path)
+                {
+                    let history = build_history_context(&conn, 50);
+                    if !history.is_empty() {
+                        info!(
+                            "📜 No existing session — injecting {} chars of message history",
+                            history.len()
+                        );
+                        prompt.push_str("\n\n");
+                        prompt.push_str(&history);
                     }
                 }
             }

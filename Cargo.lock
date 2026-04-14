@@ -302,6 +302,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "urlencoding",
+ "uuid",
  "whisper-rs",
  "zip",
 ]

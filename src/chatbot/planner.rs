@@ -268,6 +268,23 @@ pub fn get_active_plan_for_task(
     }
 }
 
+/// Create the plans table schema (used by tests and BotMessageDb).
+pub fn create_plans_table(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS plans (
+            id              TEXT PRIMARY KEY,
+            task_id         TEXT NOT NULL,
+            steps_json      TEXT NOT NULL,
+            current_step    INTEGER NOT NULL DEFAULT 0,
+            status          TEXT NOT NULL DEFAULT 'planning',
+            iteration       INTEGER NOT NULL DEFAULT 0,
+            max_iterations  INTEGER NOT NULL DEFAULT 3,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )
+}
+
 /// Simple UUID v4 generator (no external dependency).
 fn uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -284,4 +301,148 @@ fn uuid_v4() -> String {
         ((random >> 48) as u16 & 0x3fff) | 0x8000,
         random as u64 & 0xffffffffffff,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_plans_table(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn test_create_and_get_plan() {
+        let conn = test_conn();
+        let steps = vec![
+            PlanStepInput {
+                description: "Step 1".into(),
+                verification: "Check 1".into(),
+                depends_on: vec![],
+            },
+            PlanStepInput {
+                description: "Step 2".into(),
+                verification: "Check 2".into(),
+                depends_on: vec![0],
+            },
+        ];
+        let plan = create_plan(&conn, "task-1", &steps).unwrap();
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.status, PlanStatus::Executing);
+
+        let loaded = get_plan(&conn, &plan.id).unwrap().unwrap();
+        assert_eq!(loaded.task_id, "task-1");
+        assert_eq!(loaded.steps.len(), 2);
+        assert_eq!(loaded.steps[1].depends_on, vec![0]);
+    }
+
+    #[test]
+    fn test_update_step_marks_plan_verifying_when_all_done() {
+        let conn = test_conn();
+        let steps = vec![PlanStepInput {
+            description: "Only step".into(),
+            verification: "Check it".into(),
+            depends_on: vec![],
+        }];
+        let mut plan = create_plan(&conn, "task-2", &steps).unwrap();
+
+        plan.steps[0].status = StepStatus::Done;
+        plan.steps[0].result = Some("Completed".into());
+        assert!(plan.all_steps_done());
+
+        plan.status = PlanStatus::Verifying;
+        update_plan(&conn, &plan).unwrap();
+
+        let loaded = get_plan(&conn, &plan.id).unwrap().unwrap();
+        assert_eq!(loaded.status, PlanStatus::Verifying);
+    }
+
+    #[test]
+    fn test_revise_plan_respects_max_iterations() {
+        let conn = test_conn();
+        let steps = vec![PlanStepInput {
+            description: "Step".into(),
+            verification: "V".into(),
+            depends_on: vec![],
+        }];
+        let mut plan = create_plan(&conn, "task-3", &steps).unwrap();
+
+        // Simulate 3 iterations (max)
+        plan.iteration = 3;
+        plan.status = PlanStatus::Failed;
+        update_plan(&conn, &plan).unwrap();
+
+        let loaded = get_plan(&conn, &plan.id).unwrap().unwrap();
+        assert_eq!(loaded.iteration, 3);
+        assert_eq!(loaded.status, PlanStatus::Failed);
+    }
+
+    #[test]
+    fn test_next_ready_step_respects_dependencies() {
+        let steps = vec![
+            PlanStep {
+                index: 0,
+                description: "A".into(),
+                verification: "V".into(),
+                status: StepStatus::Pending,
+                result: None,
+                depends_on: vec![],
+            },
+            PlanStep {
+                index: 1,
+                description: "B".into(),
+                verification: "V".into(),
+                status: StepStatus::Pending,
+                result: None,
+                depends_on: vec![0],
+            },
+        ];
+        let plan = Plan {
+            id: "p1".into(),
+            task_id: "t1".into(),
+            steps: steps.clone(),
+            current_step: 0,
+            status: PlanStatus::Executing,
+            iteration: 0,
+            max_iterations: 3,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        // Step 0 has no deps → ready
+        assert_eq!(plan.next_ready_step(), Some(0));
+
+        // Mark step 0 done → step 1 should be ready
+        let mut plan2 = plan;
+        plan2.steps[0].status = StepStatus::Done;
+        assert_eq!(plan2.next_ready_step(), Some(1));
+
+        // Mark step 1 done → no more ready steps
+        plan2.steps[1].status = StepStatus::Done;
+        assert_eq!(plan2.next_ready_step(), None);
+    }
+
+    #[test]
+    fn test_get_active_plan_for_task() {
+        let conn = test_conn();
+        let steps = vec![PlanStepInput {
+            description: "S".into(),
+            verification: "V".into(),
+            depends_on: vec![],
+        }];
+        let plan = create_plan(&conn, "task-x", &steps).unwrap();
+
+        let active = get_active_plan_for_task(&conn, "task-x").unwrap();
+        assert!(active.is_some());
+        assert_eq!(active.unwrap().id, plan.id);
+
+        // Non-existent task returns None
+        assert!(
+            get_active_plan_for_task(&conn, "task-nope")
+                .unwrap()
+                .is_none()
+        );
+    }
 }

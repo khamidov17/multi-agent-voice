@@ -98,6 +98,7 @@ fn unauthorized() -> Response {
 
 // ---------- DB helpers ----------
 
+#[allow(clippy::result_large_err)]
 fn open_db(path: &std::path::Path) -> Result<Connection, Response> {
     let conn = Connection::open(path).map_err(|e| {
         error!("Dashboard: failed to open DB: {e}");
@@ -525,23 +526,23 @@ async fn update_task(
     }
 
     // Validate priority and status against allowlists when provided.
-    if let Some(ref priority) = payload.priority {
-        if !VALID_PRIORITIES.contains(&priority.as_str()) {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("invalid priority: must be one of {:?}", VALID_PRIORITIES),
-            )
-                .into_response();
-        }
+    if let Some(ref priority) = payload.priority
+        && !VALID_PRIORITIES.contains(&priority.as_str())
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("invalid priority: must be one of {:?}", VALID_PRIORITIES),
+        )
+            .into_response();
     }
-    if let Some(ref status) = payload.status {
-        if !VALID_STATUSES.contains(&status.as_str()) {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("invalid status: must be one of {:?}", VALID_STATUSES),
-            )
-                .into_response();
-        }
+    if let Some(ref status) = payload.status
+        && !VALID_STATUSES.contains(&status.as_str())
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("invalid status: must be one of {:?}", VALID_STATUSES),
+        )
+            .into_response();
     }
 
     let db_path = state.shared_db_path.clone();

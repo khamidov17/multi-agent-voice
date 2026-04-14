@@ -35,3 +35,4 @@ urlencoding = "2"
 rust_xlsxwriter = "0.81"
 libc = "0.2"
 serde_yaml = "0.9"
+uuid = { version = "1", features = ["v4"] }

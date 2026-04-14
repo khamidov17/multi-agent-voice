@@ -345,6 +345,17 @@ impl Database {
                 post_count  INTEGER DEFAULT 0,
                 PRIMARY KEY (chat_id, date)
             );
+
+            -- Automatic turn snapshots (LangGraph-inspired)
+            CREATE TABLE IF NOT EXISTS turn_snapshots (
+                id          TEXT PRIMARY KEY,
+                bot_name    TEXT NOT NULL,
+                turn_number INTEGER NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_snapshots_bot
+                ON turn_snapshots(bot_name, turn_number DESC);
         "#,
         )
         .expect("Failed to initialize database schema");

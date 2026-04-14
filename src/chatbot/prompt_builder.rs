@@ -109,6 +109,12 @@ Write to memories/reflections/{date}.md:
 - What to do differently next time
 These are loaded on next startup so you don't repeat mistakes.
 
+**ORCHESTRATOR DASHBOARD:**
+Use `orchestrator_status` to see the big picture: all active tasks, plan progress,
+pending handoffs, consensus requests, and agent health in one view. Use this during
+MONITOR cognitive ticks and before making delegation decisions. You are the CTO —
+you should always know the state of every workstream.
+
 **RULES:**
 - ALWAYS report back to the group when done — never go silent
 - ALWAYS use sleep (not stop) when waiting for Sentinel's evaluation
@@ -889,6 +895,12 @@ Use `request_consensus` before these actions. Sleep and wait for votes.
 When you receive [CONSENSUS_REQUEST:id], review and use `vote_consensus`.
 If consensus is rejected, do NOT proceed — find an alternative approach.
 
+# Consensus Enforcement
+Deployments, bans, and new tool builds are HARD-BLOCKED without consensus approval.
+If you try to execute these without approval, the tool will return an error.
+Approved consensus is valid for 30 minutes — execute promptly after approval.
+Use get_progress to see the full audit trail for any task.
+
 # Task Persistence
 
 For long-running tasks, use `checkpoint_task` to save your progress periodically.
@@ -903,6 +915,15 @@ If you restart, you'll receive a [SYSTEM] TASK_RESUME message with your last che
 
 **Checkpoint after each major step.** If you crash mid-task, you resume from the last checkpoint,
 not from the beginning. The more often you checkpoint, the less work you lose.
+
+# Automatic Turn Snapshots
+
+Every turn you complete is automatically snapshotted — what triggered it, what tools
+you used, what messages you sent, how it ended. You don't need to do anything for this.
+Use `get_snapshots` to review your recent activity (useful for debugging and self-evaluation).
+On restart, your last snapshot is included in the TASK_RESUME message so you have full
+context of what you were doing. Manual `checkpoint_task` still exists for structured
+task state — snapshots complement it by capturing the broader context automatically.
 
 # Cognitive Loop
 
@@ -971,7 +992,7 @@ Use `query` to search the SQLite database with SQL SELECT statements.
 Output format: Return a JSON object with:
 - "action": "stop" (when done), "sleep" (to pause and wait), or "heartbeat" (still working)
 - "reason": required when action=stop — explain why you're stopping
-- "sleep_ms": when action=sleep — how long to pause in ms (max 300000). Use this to wait for a teammate.
+- "sleep_ms": when action=sleep — how long to pause in ms (max 300000). Use this to wait for a teammate. You'll wake up IMMEDIATELY when a teammate sends you a message — use sleep(300000) as a generous timeout and you'll almost always wake early.
 - "tool_calls": array of tool calls to execute (send_message, query, etc.)
 
 **CRITICAL — WHEN TO SLEEP vs STOP:**
@@ -1050,7 +1071,7 @@ pub(crate) fn load_recent_reflections(config: &ChatbotConfig) -> String {
     }
 
     // Sort descending by file name so newest comes first
-    entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
     entries.truncate(3);
 
     let mut out = String::from("# Recent Reflections (last 3 — apply these lessons)\n\n");

@@ -18,6 +18,10 @@ fn default_metrics_count() -> u64 {
     5
 }
 
+fn default_snapshot_count() -> Option<u64> {
+    Some(5)
+}
+
 /// Tool definition for Claude.
 #[derive(Debug, Clone, Serialize)]
 pub struct Tool {
@@ -575,6 +579,21 @@ pub enum ToolCall {
         task_id: Option<String>,
         #[serde(default)]
         last_hours: Option<u64>,
+    },
+
+    /// Get the full progress audit trail for a task.
+    GetProgress { task_id: String },
+
+    /// Get a comprehensive orchestrator status report across all agents.
+    OrchestratorStatus {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+    },
+
+    /// Get recent turn snapshots (automatic state captures).
+    GetSnapshots {
+        #[serde(default = "default_snapshot_count")]
+        last_n: Option<u64>,
     },
 
     /// Signal that processing is complete.
@@ -1399,6 +1418,49 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "get_progress".to_string(),
+            description: "Get the full progress audit trail for a task. Shows what was proposed, approved, executed, verified.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" }
+                },
+                "required": ["task_id"]
+            }),
+        },
+        Tool {
+            name: "orchestrator_status".to_string(),
+            description: "Get a comprehensive status report: active tasks, plan progress, \
+                pending handoffs, consensus requests, agent health, and recent activity. \
+                The orchestrator's dashboard. Available to ALL agents.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Focus on a specific task (optional). If omitted, shows all active work."
+                    }
+                }
+            }),
+        },
+        Tool {
+            name: "get_snapshots".to_string(),
+            description: "Get recent turn snapshots — automatic state captures showing what \
+                triggered each turn, what tools were used, what messages were sent, and how \
+                it ended. Useful for debugging, self-evaluation, and reviewing recent activity."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "last_n": {
+                        "type": "integer",
+                        "description": "Number of recent snapshots to return (default 5, max 20)",
+                        "default": 5
+                    }
+                }
+            }),
+        },
+        Tool {
             name: "done".to_string(),
             description: "Legacy stop signal. PREFER using action='stop' with a reason field in the structured output instead. If you use this tool, it acts as action='stop'. In DMs, always send a message first. In groups, you MUST respond to teammate messages before stopping.".to_string(),
             parameters: serde_json::json!({
@@ -1452,11 +1514,37 @@ mod tests {
         assert_eq!(tools[0].name, "send_message");
         // Last tool is always done
         assert_eq!(tools.last().unwrap().name, "done");
-        // Total count: 36 original + 25 new = 61 (verify this matches actual)
-        assert!(
-            tools.len() >= 55,
-            "Expected at least 55 tools, got {}. New tools may be missing definitions.",
-            tools.len()
+        // Exact count — update this when adding/removing tools
+        assert_eq!(
+            tools.len(),
+            65,
+            "Tool count changed — update this test. Tools: {:?}",
+            tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_no_duplicate_tool_names() {
+        let tools = get_tool_definitions();
+        let mut names = std::collections::HashSet::new();
+        for tool in &tools {
+            assert!(
+                names.insert(&tool.name),
+                "Duplicate tool name: {}",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_all_tools_have_object_parameters() {
+        let tools = get_tool_definitions();
+        for tool in &tools {
+            assert_eq!(
+                tool.parameters["type"], "object",
+                "Tool {} parameters must be an object",
+                tool.name
+            );
+        }
     }
 }

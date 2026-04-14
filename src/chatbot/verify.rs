@@ -81,18 +81,17 @@ pub async fn run_http_probe(probe: &HttpProbe) -> ProbeResult {
             let mut passed = status == probe.expected_status;
             let mut error = None;
 
-            if passed {
-                if let Some(ref contains) = probe.body_contains {
-                    if !body.contains(contains.as_str()) {
-                        passed = false;
-                        error = Some(format!(
-                            "Body does not contain '{}' (got {} chars)",
-                            contains,
-                            body.len()
-                        ));
-                    }
-                }
-            } else {
+            if passed
+                && let Some(ref contains) = probe.body_contains
+                && !body.contains(contains.as_str())
+            {
+                passed = false;
+                error = Some(format!(
+                    "Body does not contain '{}' (got {} chars)",
+                    contains,
+                    body.len()
+                ));
+            } else if !passed {
                 error = Some(format!(
                     "Expected status {}, got {}",
                     probe.expected_status, status
@@ -177,14 +176,13 @@ pub async fn run_process_probe(probe: &ProcessProbe) -> ProcessResult {
             let mut passed = exit_code == probe.expected_exit_code;
             let mut error = None;
 
-            if passed {
-                if let Some(ref contains) = probe.stdout_contains {
-                    if !stdout.contains(contains.as_str()) {
-                        passed = false;
-                        error = Some(format!("stdout does not contain '{}'", contains));
-                    }
-                }
-            } else {
+            if passed
+                && let Some(ref contains) = probe.stdout_contains
+                && !stdout.contains(contains.as_str())
+            {
+                passed = false;
+                error = Some(format!("stdout does not contain '{}'", contains));
+            } else if !passed {
                 error = Some(format!(
                     "Expected exit code {}, got {}",
                     probe.expected_exit_code, exit_code
@@ -267,15 +265,15 @@ pub fn run_log_probe(
     }
 
     // Verify canonical path is inside data_dir
-    if let (Ok(canonical), Ok(base)) = (full_path.canonicalize(), data_dir.canonicalize()) {
-        if !canonical.starts_with(&base) {
-            return LogResult {
-                passed: false,
-                matches_found: 0,
-                matching_lines: Vec::new(),
-                error: Some("Path escapes data directory".to_string()),
-            };
-        }
+    if let (Ok(canonical), Ok(base)) = (full_path.canonicalize(), data_dir.canonicalize())
+        && !canonical.starts_with(&base)
+    {
+        return LogResult {
+            passed: false,
+            matches_found: 0,
+            matching_lines: Vec::new(),
+            error: Some("Path escapes data directory".to_string()),
+        };
     }
 
     let content = match std::fs::read_to_string(&full_path) {
@@ -329,5 +327,56 @@ pub fn run_log_probe(
         matches_found: matching_lines.len(),
         matching_lines: matching_lines.into_iter().take(20).collect(), // cap at 20
         error: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_log_probe_detects_errors() {
+        let dir = std::env::temp_dir().join("verify_test_log");
+        let _ = std::fs::create_dir_all(&dir);
+        let log_path = dir.join("test.log");
+        std::fs::write(
+            &log_path,
+            "INFO all good\nERROR something broke\nINFO fine again\n",
+        )
+        .unwrap();
+
+        let result = run_log_probe(&dir, "test.log", &["ERROR".to_string()], 9999);
+        assert!(!result.passed);
+        assert_eq!(result.matches_found, 1);
+        assert!(result.matching_lines[0].contains("something broke"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_log_probe_passes_when_clean() {
+        let dir = std::env::temp_dir().join("verify_test_clean");
+        let _ = std::fs::create_dir_all(&dir);
+        let log_path = dir.join("clean.log");
+        std::fs::write(&log_path, "INFO all good\nDEBUG trace\nINFO done\n").unwrap();
+
+        let result = run_log_probe(&dir, "clean.log", &["ERROR".to_string()], 9999);
+        assert!(result.passed);
+        assert_eq!(result.matches_found, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_log_probe_path_traversal() {
+        let dir = std::env::temp_dir().join("verify_test_traversal");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let result = run_log_probe(&dir, "../../../etc/passwd", &["root".to_string()], 9999);
+        // Should fail due to path traversal protection or file not found
+        // The important thing is it doesn't read /etc/passwd
+        assert!(result.passed || result.error.is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
