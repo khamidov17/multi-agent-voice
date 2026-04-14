@@ -137,6 +137,8 @@ impl BotState {
                 reminder_store: reminder_store.clone(),
                 allowed_chat_ids,
                 shared_bot_messages_db: Some(shared_bot_messages_db),
+                cognitive_interval_secs: config.cognitive_interval_secs,
+                cognitive_enabled: config.cognitive_enabled,
             };
 
             // Fetch available TTS voices if endpoint configured

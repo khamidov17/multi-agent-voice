@@ -159,15 +159,19 @@ impl BotMessageDb {
         );
 
         // Migrate: add status + current_task to heartbeats (existing DBs).
-        if conn.prepare("SELECT status FROM heartbeats LIMIT 0").is_err() {
+        if conn
+            .prepare("SELECT status FROM heartbeats LIMIT 0")
+            .is_err()
+        {
             let _ = conn.execute_batch(
                 "ALTER TABLE heartbeats ADD COLUMN status TEXT NOT NULL DEFAULT 'idle';",
             );
         }
-        if conn.prepare("SELECT current_task FROM heartbeats LIMIT 0").is_err() {
-            let _ = conn.execute_batch(
-                "ALTER TABLE heartbeats ADD COLUMN current_task TEXT;",
-            );
+        if conn
+            .prepare("SELECT current_task FROM heartbeats LIMIT 0")
+            .is_err()
+        {
+            let _ = conn.execute_batch("ALTER TABLE heartbeats ADD COLUMN current_task TEXT;");
         }
 
         info!("BotMessageDb opened at {}", path.display());
@@ -288,7 +292,9 @@ impl BotMessageDb {
                 bot_name: row.get(0)?,
                 last_heartbeat: row.get(1)?,
                 iteration_count: row.get(2)?,
-                status: row.get::<_, String>(3).unwrap_or_else(|_| "idle".to_string()),
+                status: row
+                    .get::<_, String>(3)
+                    .unwrap_or_else(|_| "idle".to_string()),
                 current_task: row.get(4).ok(),
             })
         })?;
@@ -448,7 +454,10 @@ impl BotMessageDb {
             .unwrap_or_default();
 
         // Check if already marked (idempotent)
-        let already = current.split(',').map(str::trim).any(|n| n.eq_ignore_ascii_case(this_bot));
+        let already = current
+            .split(',')
+            .map(str::trim)
+            .any(|n| n.eq_ignore_ascii_case(this_bot));
         if already {
             self.conn.execute_batch("COMMIT")?;
             return Ok(());

@@ -24,6 +24,13 @@ struct ConfigFile {
     /// Other users/groups are silently ignored.
     #[serde(default)]
     owner_dms_only: bool,
+    /// Cognitive loop interval in seconds (default: 300 for Tier 1, 600 for Tier 2).
+    /// Set to 0 to disable.
+    #[serde(default)]
+    cognitive_interval: Option<u64>,
+    /// Enable/disable cognitive loop (default: true).
+    #[serde(default = "default_true_config")]
+    cognitive_enabled: bool,
     /// Gemini API key for image generation
     #[serde(default)]
     gemini_api_key: String,
@@ -82,6 +89,10 @@ fn default_max_strikes() -> u8 {
     3
 }
 
+fn default_true_config() -> bool {
+    true
+}
+
 fn default_live_app_port() -> u16 {
     3001
 }
@@ -136,6 +147,10 @@ pub struct Config {
     /// Dashboard credentials (loaded from config, never hardcoded).
     pub dashboard_username: Option<String>,
     pub dashboard_password: Option<String>,
+    /// Cognitive loop interval in seconds. 0 = disabled.
+    pub cognitive_interval_secs: u64,
+    /// Whether cognitive loop is enabled.
+    pub cognitive_enabled: bool,
 }
 
 impl Config {
@@ -208,6 +223,12 @@ impl Config {
             brave_search_api_key: file.brave_search_api_key,
             dashboard_username: file.dashboard_username,
             dashboard_password: file.dashboard_password,
+            cognitive_interval_secs: file.cognitive_interval.unwrap_or(if file.full_permissions {
+                300
+            } else {
+                600
+            }),
+            cognitive_enabled: file.cognitive_enabled,
         }
     }
 

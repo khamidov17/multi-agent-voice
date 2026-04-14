@@ -1234,10 +1234,19 @@ fn spawn_process(
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
-            use libc::{rlimit, setrlimit, RLIMIT_AS, RLIMIT_NOFILE, RLIMIT_NPROC};
-            let mem = rlimit { rlim_cur: 4_294_967_296, rlim_max: 4_294_967_296 }; // 4GB
-            let files = rlimit { rlim_cur: 1024, rlim_max: 1024 };
-            let procs = rlimit { rlim_cur: 300, rlim_max: 300 };
+            use libc::{RLIMIT_AS, RLIMIT_NOFILE, RLIMIT_NPROC, rlimit, setrlimit};
+            let mem = rlimit {
+                rlim_cur: 4_294_967_296,
+                rlim_max: 4_294_967_296,
+            }; // 4GB
+            let files = rlimit {
+                rlim_cur: 1024,
+                rlim_max: 1024,
+            };
+            let procs = rlimit {
+                rlim_cur: 300,
+                rlim_max: 300,
+            };
             let _ = setrlimit(RLIMIT_AS, &mem);
             let _ = setrlimit(RLIMIT_NOFILE, &files);
             let _ = setrlimit(RLIMIT_NPROC, &procs);
