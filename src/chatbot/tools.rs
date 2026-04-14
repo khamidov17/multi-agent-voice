@@ -596,6 +596,25 @@ pub enum ToolCall {
         last_n: Option<u64>,
     },
 
+    /// Start a code-enforced multi-agent workflow.
+    StartWorkflow {
+        name: String,
+        /// JSON array of step definitions
+        steps: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_iterations: Option<u32>,
+    },
+
+    /// Report completion of a workflow step. The Rust engine decides what happens next.
+    CompleteWorkflowStep {
+        workflow_id: String,
+        result: String,
+        #[serde(default)]
+        passed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_data: Option<String>,
+    },
+
     /// Signal that processing is complete.
     Done,
 
@@ -1461,6 +1480,63 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "start_workflow".to_string(),
+            description: "Start a code-enforced multi-agent workflow. The Rust engine \
+                controls the flow — agents don't need to sleep, delegate, or track \
+                iterations. Steps execute sequentially; verify failures automatically \
+                loop back. Use for tasks needing multiple agents (build→verify→report)."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Human-readable workflow name"
+                    },
+                    "steps": {
+                        "type": "string",
+                        "description": "JSON array of step objects. Each: {name, agent, instruction, output_key?, step_type: 'execute'|'verify'|{gate:{condition_key,expected_value}}}"
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "description": "Max verify→retry loops (default 5)",
+                        "default": 5
+                    }
+                },
+                "required": ["name", "steps"]
+            }),
+        },
+        Tool {
+            name: "complete_workflow_step".to_string(),
+            description: "Report completion of your current workflow step. The Rust engine \
+                decides what happens next — routes to the next agent, loops back on verify \
+                failure, or completes the workflow. You don't need to delegate or sleep."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "The workflow ID from the [WORKFLOW:id] message"
+                    },
+                    "result": {
+                        "type": "string",
+                        "description": "What you produced/found in this step"
+                    },
+                    "passed": {
+                        "type": "boolean",
+                        "description": "For Verify steps: did verification pass? For Execute steps: always true.",
+                        "default": true
+                    },
+                    "output_data": {
+                        "type": "string",
+                        "description": "Optional structured JSON data to save to workflow state (overrides result for state storage)"
+                    }
+                },
+                "required": ["workflow_id", "result"]
+            }),
+        },
+        Tool {
             name: "done".to_string(),
             description: "Legacy stop signal. PREFER using action='stop' with a reason field in the structured output instead. If you use this tool, it acts as action='stop'. In DMs, always send a message first. In groups, you MUST respond to teammate messages before stopping.".to_string(),
             parameters: serde_json::json!({
@@ -1517,7 +1593,7 @@ mod tests {
         // Exact count — update this when adding/removing tools
         assert_eq!(
             tools.len(),
-            65,
+            67,
             "Tool count changed — update this test. Tools: {:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );

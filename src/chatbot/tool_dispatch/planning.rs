@@ -520,3 +520,178 @@ pub(super) async fn execute_get_progress(
     }
     Ok(Some(lines.join("\n")))
 }
+
+// ─── Workflow tools ─────────────────────────────────────────────────────
+
+/// Start a code-enforced workflow (StartWorkflow tool).
+pub(super) async fn execute_start_workflow(
+    config: &ChatbotConfig,
+    name: &str,
+    steps_json: &str,
+    max_iterations: Option<u32>,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    // Parse step definitions from JSON
+    let step_defs: Vec<crate::chatbot::workflow::WorkflowStep> =
+        serde_json::from_str(steps_json).map_err(|e| format!("Invalid steps JSON: {e}"))?;
+
+    if step_defs.is_empty() {
+        return Err("Workflow must have at least one step".to_string());
+    }
+
+    // Build workflow
+    let mut wf = crate::chatbot::workflow::Workflow {
+        id: format!("wf-{}", uuid::Uuid::new_v4()),
+        name: name.to_string(),
+        steps: step_defs,
+        max_iterations: max_iterations.unwrap_or(5),
+        ..Default::default()
+    };
+
+    // Set first step to Running
+    wf.steps[0].status = crate::chatbot::workflow::StepStatus::Running;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    crate::chatbot::workflow::save_workflow(&db.conn, &wf)
+        .map_err(|e| format!("Save failed: {e}"))?;
+
+    // Inject the first step's instruction to the assigned agent via bot_messages
+    let first_step = &wf.steps[0];
+    let instruction =
+        crate::chatbot::workflow::substitute_state_vars(&first_step.instruction, &wf.state);
+    let message = format!(
+        "[WORKFLOW:{}] Step 1/{}: {}\n\n{}",
+        wf.id,
+        wf.steps.len(),
+        first_step.name,
+        instruction,
+    );
+
+    let _ = db.insert_typed(
+        &config.bot_name,
+        Some(&first_step.agent),
+        &message,
+        crate::chatbot::bot_messages::message_type::CHAT,
+        None,
+        None,
+    );
+
+    info!(
+        "[workflow] Started '{}' ({}): {} steps, first → {}",
+        wf.name,
+        wf.id,
+        wf.steps.len(),
+        first_step.agent
+    );
+
+    Ok(Some(format!(
+        "Workflow '{}' started (id: {}). {} steps, first step '{}' sent to {}.\n\
+         The Rust engine will control the flow — agents just call complete_workflow_step when done.",
+        wf.name,
+        wf.id,
+        wf.steps.len(),
+        first_step.name,
+        first_step.agent,
+    )))
+}
+
+/// Report completion of a workflow step (CompleteWorkflowStep tool).
+/// The Rust engine decides what happens next.
+pub(super) async fn execute_complete_workflow_step(
+    config: &ChatbotConfig,
+    workflow_id: &str,
+    result: &str,
+    passed: bool,
+    output_data: Option<&str>,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    // Advance the workflow — the Rust code decides what happens next
+    let advance_result = crate::chatbot::workflow::advance_workflow(
+        &db.conn,
+        workflow_id,
+        result,
+        passed,
+        output_data,
+    )?;
+
+    match advance_result {
+        crate::chatbot::workflow::AdvanceResult::NextStep { agent, message } => {
+            // Route the next instruction to the target agent via bot_messages
+            let _ = db.insert_typed(
+                &config.bot_name,
+                Some(&agent),
+                &message,
+                crate::chatbot::bot_messages::message_type::CHAT,
+                None,
+                None,
+            );
+
+            // Wake the target agent
+            crate::chatbot::event_bus::global_event_bus().wake(&agent);
+
+            Ok(Some(format!(
+                "Step complete. Next step routed to {} by the workflow engine.\n\
+                 You can stop now — the engine handles the flow.",
+                agent,
+            )))
+        }
+        crate::chatbot::workflow::AdvanceResult::Completed(wf) => {
+            // Notify all agents that the workflow finished
+            let _ = db.insert_typed(
+                &config.bot_name,
+                None, // broadcast
+                &format!(
+                    "[WORKFLOW:{}] COMPLETED: '{}' finished successfully.\nFinal state: {}",
+                    wf.id,
+                    wf.name,
+                    serde_json::to_string_pretty(&wf.state).unwrap_or_default(),
+                ),
+                crate::chatbot::bot_messages::message_type::STATUS,
+                None,
+                None,
+            );
+
+            Ok(Some(format!(
+                "Workflow '{}' COMPLETED successfully after {} steps.",
+                wf.name,
+                wf.steps.len(),
+            )))
+        }
+        crate::chatbot::workflow::AdvanceResult::MaxIterations(wf) => {
+            // Notify about max iterations
+            let _ = db.insert_typed(
+                &config.bot_name,
+                None,
+                &format!(
+                    "[WORKFLOW:{}] MAX ITERATIONS: '{}' hit {} iterations without passing verification.\n\
+                     Last result: {}",
+                    wf.id,
+                    wf.name,
+                    wf.max_iterations,
+                    result,
+                ),
+                crate::chatbot::bot_messages::message_type::STATUS,
+                None,
+                None,
+            );
+
+            Ok(Some(format!(
+                "Workflow '{}' hit MAX ITERATIONS ({}). Verification never passed. Escalate to owner.",
+                wf.name, wf.max_iterations,
+            )))
+        }
+    }
+}

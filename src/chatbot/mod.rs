@@ -29,6 +29,7 @@ pub mod tools;
 pub mod tts;
 pub mod verify;
 pub mod whisper;
+pub mod workflow;
 pub mod yandex;
 
 pub use claude_code::ClaudeCode;

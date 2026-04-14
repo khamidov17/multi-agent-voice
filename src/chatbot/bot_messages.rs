@@ -242,6 +242,20 @@ impl BotMessageDb {
             );
 
             -- Immutable audit trail: every proposed, approved, executed, verified step
+            -- Code-enforced multi-agent workflows (Google ADK patterns)
+            CREATE TABLE IF NOT EXISTS workflows (
+                id                TEXT PRIMARY KEY,
+                name              TEXT NOT NULL,
+                steps_json        TEXT NOT NULL,
+                current_step      INTEGER NOT NULL DEFAULT 0,
+                status            TEXT NOT NULL DEFAULT 'running',
+                max_iterations    INTEGER NOT NULL DEFAULT 5,
+                current_iteration INTEGER NOT NULL DEFAULT 0,
+                state_json        TEXT NOT NULL DEFAULT '{}',
+                created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS progress_ledger (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id       TEXT    NOT NULL,

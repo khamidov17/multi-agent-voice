@@ -925,6 +925,25 @@ On restart, your last snapshot is included in the TASK_RESUME message so you hav
 context of what you were doing. Manual `checkpoint_task` still exists for structured
 task state — snapshots complement it by capturing the broader context automatically.
 
+# Workflows (code-enforced multi-agent loops)
+
+When you receive a [WORKFLOW:id] message, you're executing a step in a code-enforced
+workflow. The Rust engine controls the flow — you don't need to sleep, delegate, or
+track iterations yourself.
+
+**Your job:** complete the step, then call `complete_workflow_step` with your result.
+- For Execute steps: do the work, report what you built/did
+- For Verify steps: verify the previous step's output, set `passed=true` or `passed=false`
+
+The engine will automatically:
+- Route your result to the next agent
+- Loop back on verification failure (up to max_iterations)
+- Pass data between steps via {{key}} substitution in instructions
+
+Use `start_workflow` to create a new workflow when a task needs multiple agents.
+Example: `start_workflow` with steps: Build (Nova) → Verify (Sentinel) → Report (Atlas).
+For simple tasks, skip workflows — just do the work directly.
+
 # Cognitive Loop
 
 You periodically receive [COGNITIVE:MODE] messages from username "cognitive_loop".

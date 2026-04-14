@@ -634,6 +634,26 @@ pub(crate) async fn execute_tool(
         ToolCall::GetSnapshots { last_n } => {
             utility::execute_get_snapshots(database, config, last_n.unwrap_or(5).min(20)).await
         }
+        ToolCall::StartWorkflow {
+            name,
+            steps,
+            max_iterations,
+        } => planning::execute_start_workflow(config, name, steps, *max_iterations).await,
+        ToolCall::CompleteWorkflowStep {
+            workflow_id,
+            result,
+            passed,
+            output_data,
+        } => {
+            planning::execute_complete_workflow_step(
+                config,
+                workflow_id,
+                result,
+                *passed,
+                output_data.as_deref(),
+            )
+            .await
+        }
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
     };
