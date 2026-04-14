@@ -14,6 +14,10 @@ fn default_summary() -> String {
     "summary".to_string()
 }
 
+fn default_metrics_count() -> u64 {
+    5
+}
+
 /// Tool definition for Claude.
 #[derive(Debug, Clone, Serialize)]
 pub struct Tool {
@@ -377,6 +381,201 @@ pub enum ToolCall {
 
     /// Load checkpoint for a task (resume after restart).
     ResumeTask { task_id: String },
+
+    /// Get system performance metrics. Available to ALL tiers.
+    GetMetrics {
+        /// Number of recent snapshots to show (default 5)
+        #[serde(default = "default_metrics_count")]
+        last_n: u64,
+    },
+
+    /// Create a structured plan for a complex task.
+    CreatePlan {
+        task_id: String,
+        /// JSON array of steps: [{"description": "...", "verification": "...", "depends_on": []}]
+        steps: String,
+    },
+
+    /// Update a plan step status (done/failed/skipped).
+    UpdatePlanStep {
+        plan_id: String,
+        step_index: usize,
+        /// "done", "failed", "skipped"
+        status: String,
+        #[serde(default)]
+        result: Option<String>,
+    },
+
+    /// Revise a plan after verification failure (max 3 revisions).
+    RevisePlan {
+        plan_id: String,
+        /// JSON array of revised steps
+        revised_steps: String,
+        reason: String,
+    },
+
+    /// Verify an HTTP endpoint (available to ALL tiers, SSRF protected).
+    VerifyHttp {
+        url: String,
+        #[serde(default)]
+        method: Option<String>,
+        #[serde(default)]
+        expected_status: Option<u16>,
+        #[serde(default)]
+        body_contains: Option<String>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+
+    /// Verify a process runs correctly (Tier 1 ONLY).
+    VerifyProcess {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        expected_exit_code: Option<i32>,
+        #[serde(default)]
+        stdout_contains: Option<String>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+
+    /// Check log files for error patterns (available to ALL tiers, read-only).
+    VerifyLogs {
+        log_file: String,
+        #[serde(default)]
+        error_patterns: Vec<String>,
+        #[serde(default)]
+        since_minutes: Option<u64>,
+    },
+
+    /// Formally delegate work to another agent with success criteria.
+    DelegateTask {
+        to_agent: String,
+        task_description: String,
+        /// JSON array of success criteria strings
+        #[serde(default)]
+        success_criteria: String,
+        #[serde(default)]
+        deadline_minutes: Option<u64>,
+        #[serde(default)]
+        priority: Option<String>,
+    },
+
+    /// Respond to a handoff: accept, complete, or reject.
+    RespondToHandoff {
+        handoff_id: i64,
+        /// "accept", "complete", "reject"
+        action: String,
+        #[serde(default)]
+        result_or_reason: Option<String>,
+    },
+
+    /// Request consensus from other agents for a risky action.
+    RequestConsensus {
+        /// "deploy", "ban", "config_change", "tool_build"
+        action_type: String,
+        description: String,
+        #[serde(default)]
+        timeout_minutes: Option<u64>,
+    },
+
+    /// Vote on a consensus request (approve or reject).
+    VoteConsensus {
+        request_id: i64,
+        /// "approve" or "reject"
+        decision: String,
+        reason: String,
+    },
+
+    /// List all custom tools in the registry. Available to ALL agents.
+    ListTools {},
+
+    /// Build a new custom tool script and register it. Tier 1 ONLY.
+    BuildTool {
+        name: String,
+        description: String,
+        /// "python" or "bash"
+        language: String,
+        /// The actual script code
+        code: String,
+        #[serde(default)]
+        parameters: Option<String>,
+    },
+
+    /// Run a registered custom tool by name. Tier 1 ONLY.
+    RunCustomTool {
+        name: String,
+        #[serde(default)]
+        input_json: Option<String>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+
+    /// Reflect on a completed task — log what worked, what didn't, and lessons learned.
+    Reflect {
+        #[serde(default)]
+        task_id: Option<String>,
+        /// "success", "partial", "failure"
+        outcome: String,
+        /// JSON array of things that worked
+        #[serde(default)]
+        what_worked: String,
+        /// JSON array of things that failed
+        #[serde(default)]
+        what_failed: String,
+        /// JSON array of actionable lessons
+        #[serde(default)]
+        lessons: String,
+    },
+
+    /// Self-evaluate your performance. Called during IMPROVE cognitive ticks (max once/6h).
+    SelfEvaluate {
+        /// Overall score 1.0-10.0
+        score: f32,
+        /// JSON array of top failure modes
+        #[serde(default)]
+        top_failure_modes: String,
+        /// JSON array of concrete improvement actions
+        #[serde(default)]
+        improvement_actions: String,
+        #[serde(default)]
+        notes: Option<String>,
+    },
+
+    /// Log a significant event to the conversation journal.
+    JournalLog {
+        /// "decision", "action", "observation", "error", "milestone"
+        entry_type: String,
+        summary: String,
+        #[serde(default)]
+        detail: Option<String>,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        tags: Option<String>,
+    },
+
+    /// Search the journal for past context.
+    JournalSearch {
+        query: String,
+        #[serde(default)]
+        entry_type: Option<String>,
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        last_hours: Option<u64>,
+        #[serde(default)]
+        limit: Option<u64>,
+    },
+
+    /// Get a condensed timeline of journal entries.
+    JournalSummary {
+        #[serde(default)]
+        task_id: Option<String>,
+        #[serde(default)]
+        last_hours: Option<u64>,
+    },
 
     /// Signal that processing is complete.
     Done,
@@ -948,6 +1147,255 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                     "task_id": { "type": "string", "description": "Task ID to resume" }
                 },
                 "required": ["task_id"]
+            }),
+        },
+        Tool {
+            name: "get_metrics".to_string(),
+            description: "Get system performance metrics. Shows messages processed, tool call stats, error rates, latency. Available to ALL agents.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "last_n": { "type": "integer", "description": "Number of recent snapshots (default 5)", "default": 5 }
+                }
+            }),
+        },
+        Tool {
+            name: "create_plan".to_string(),
+            description: "Create a structured plan for a complex task. Each step needs a description and verification criterion. Use for ANY task requiring 3+ tool calls.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID this plan is for" },
+                    "steps": { "type": "string", "description": "JSON array: [{\"description\": \"...\", \"verification\": \"...\", \"depends_on\": []}]" }
+                },
+                "required": ["task_id", "steps"]
+            }),
+        },
+        Tool {
+            name: "update_plan_step".to_string(),
+            description: "Mark a plan step as done/failed/skipped. Call after completing each step. Include result notes.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": { "type": "string" },
+                    "step_index": { "type": "integer", "description": "0-based step index" },
+                    "status": { "type": "string", "enum": ["done", "failed", "skipped"] },
+                    "result": { "type": "string", "description": "What happened / output notes" }
+                },
+                "required": ["plan_id", "step_index", "status"]
+            }),
+        },
+        Tool {
+            name: "revise_plan".to_string(),
+            description: "Revise a plan after verification failure. Max 3 revisions. Provide new steps and reason for revision.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": { "type": "string" },
+                    "revised_steps": { "type": "string", "description": "JSON array of new steps" },
+                    "reason": { "type": "string", "description": "Why the plan needs revision" }
+                },
+                "required": ["plan_id", "revised_steps", "reason"]
+            }),
+        },
+        Tool {
+            name: "verify_http".to_string(),
+            description: "Verify an HTTP endpoint works. Hit a URL and check status code + response body. SSRF protected. Available to ALL agents.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL to probe" },
+                    "method": { "type": "string", "description": "HTTP method (default: GET)", "default": "GET" },
+                    "expected_status": { "type": "integer", "description": "Expected status code (default: 200)", "default": 200 },
+                    "body_contains": { "type": "string", "description": "String the response body should contain" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default: 10)", "default": 10 }
+                },
+                "required": ["url"]
+            }),
+        },
+        Tool {
+            name: "verify_process".to_string(),
+            description: "Run a command and verify exit code + output. Tier 1 only (requires Bash access). Use to verify builds, tests, scripts.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Command to run" },
+                    "args": { "type": "array", "items": {"type": "string"}, "description": "Arguments" },
+                    "expected_exit_code": { "type": "integer", "description": "Expected exit code (default: 0)", "default": 0 },
+                    "stdout_contains": { "type": "string", "description": "String stdout should contain" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout (default: 30, max: 120)", "default": 30 }
+                },
+                "required": ["command"]
+            }),
+        },
+        Tool {
+            name: "verify_logs".to_string(),
+            description: "Check log files for error patterns. Read-only, available to ALL agents. Scans recent log entries for regex patterns.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "log_file": { "type": "string", "description": "Log file path relative to data dir (e.g. 'logs/claudir.log')" },
+                    "error_patterns": { "type": "array", "items": {"type": "string"}, "description": "Regex patterns to search for" },
+                    "since_minutes": { "type": "integer", "description": "Only check last N minutes (default: 5)", "default": 5 }
+                },
+                "required": ["log_file", "error_patterns"]
+            }),
+        },
+        Tool {
+            name: "delegate_task".to_string(),
+            description: "Formally delegate work to another agent with success criteria. Creates a contract the other agent must fulfill.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "to_agent": { "type": "string", "description": "Target: 'Nova', 'Atlas', or 'Security'" },
+                    "task_description": { "type": "string" },
+                    "success_criteria": { "type": "string", "description": "JSON array of criteria strings" },
+                    "deadline_minutes": { "type": "integer", "description": "Deadline in minutes" },
+                    "priority": { "type": "string", "enum": ["low", "medium", "high"] }
+                },
+                "required": ["to_agent", "task_description"]
+            }),
+        },
+        Tool {
+            name: "respond_to_handoff".to_string(),
+            description: "Respond to a delegation handoff: accept it, complete it with results, or reject it.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "handoff_id": { "type": "integer", "description": "Handoff ID from the [HANDOFF:id] message" },
+                    "action": { "type": "string", "enum": ["accept", "complete", "reject"] },
+                    "result_or_reason": { "type": "string", "description": "Result (for complete) or reason (for reject)" }
+                },
+                "required": ["handoff_id", "action"]
+            }),
+        },
+        Tool {
+            name: "request_consensus".to_string(),
+            description: "Request approval from other agents for a risky action (deploy, ban, config change). Required agents are auto-determined by action type.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action_type": { "type": "string", "enum": ["deploy", "ban", "config_change", "tool_build", "plan_approve"], "description": "Type of action needing approval" },
+                    "description": { "type": "string", "description": "What you want to do and why" },
+                    "timeout_minutes": { "type": "integer", "description": "How long to wait (default: 10)", "default": 10 }
+                },
+                "required": ["action_type", "description"]
+            }),
+        },
+        Tool {
+            name: "vote_consensus".to_string(),
+            description: "Vote on a consensus request. Approve or reject another agent's proposed risky action.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "request_id": { "type": "integer", "description": "Consensus request ID from [CONSENSUS_REQUEST:id] message" },
+                    "decision": { "type": "string", "enum": ["approve", "reject"] },
+                    "reason": { "type": "string", "description": "Why you approve or reject" }
+                },
+                "required": ["request_id", "decision", "reason"]
+            }),
+        },
+        Tool {
+            name: "list_tools".to_string(),
+            description: "List all custom tools in the workspace registry. See what capabilities have been built. Available to ALL agents.".to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        Tool {
+            name: "build_tool".to_string(),
+            description: "Build a new custom tool (Python/Bash script), register it, and broadcast to all agents. Tier 1 ONLY.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Tool name (alphanumeric + underscore)" },
+                    "description": { "type": "string" },
+                    "language": { "type": "string", "enum": ["python", "bash"] },
+                    "code": { "type": "string", "description": "The script code" },
+                    "parameters": { "type": "string", "description": "Optional JSON schema for inputs" }
+                },
+                "required": ["name", "description", "language", "code"]
+            }),
+        },
+        Tool {
+            name: "run_custom_tool".to_string(),
+            description: "Run a registered custom tool by name. Tier 1 ONLY. Pass input as JSON.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Tool name from registry" },
+                    "input_json": { "type": "string", "description": "JSON input (passed as arg)" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout (default 60, max 300)" }
+                },
+                "required": ["name"]
+            }),
+        },
+        Tool {
+            name: "reflect".to_string(),
+            description: "Log what you learned from a completed task. Call after any non-trivial work. Your reflections are auto-injected into your prompt — this is how you improve over time.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "Task ID (optional)" },
+                    "outcome": { "type": "string", "enum": ["success", "partial", "failure"] },
+                    "what_worked": { "type": "string", "description": "JSON array of things that worked" },
+                    "what_failed": { "type": "string", "description": "JSON array of things that failed" },
+                    "lessons": { "type": "string", "description": "JSON array of actionable lessons" }
+                },
+                "required": ["outcome", "lessons"]
+            }),
+        },
+        Tool {
+            name: "self_evaluate".to_string(),
+            description: "Record your periodic self-evaluation. Score yourself 1-10, identify failure modes and improvement actions. Max once every 6 hours.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "score": { "type": "number", "description": "Self-score 1.0-10.0. Be honest." },
+                    "top_failure_modes": { "type": "string", "description": "JSON array of your top failure modes" },
+                    "improvement_actions": { "type": "string", "description": "JSON array of concrete actions to improve" },
+                    "notes": { "type": "string", "description": "Optional additional notes" }
+                },
+                "required": ["score", "top_failure_modes", "improvement_actions"]
+            }),
+        },
+        Tool {
+            name: "journal_log".to_string(),
+            description: "Log a significant event (decision, action, observation, error, milestone) to your conversation journal. Survives restarts.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entry_type": { "type": "string", "enum": ["decision", "action", "observation", "error", "milestone"] },
+                    "summary": { "type": "string", "description": "1-2 sentence summary" },
+                    "detail": { "type": "string", "description": "Full context (optional)" },
+                    "task_id": { "type": "string" },
+                    "tags": { "type": "string", "description": "JSON array of searchable tags" }
+                },
+                "required": ["entry_type", "summary"]
+            }),
+        },
+        Tool {
+            name: "journal_search".to_string(),
+            description: "Search your journal for past context. 'Why did we choose X?' 'What happened last time?'".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "entry_type": { "type": "string" },
+                    "task_id": { "type": "string" },
+                    "last_hours": { "type": "integer" },
+                    "limit": { "type": "integer", "default": 10 }
+                },
+                "required": ["query"]
+            }),
+        },
+        Tool {
+            name: "journal_summary".to_string(),
+            description: "Get a condensed timeline of journal entries. Shows what happened recently.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "last_hours": { "type": "integer", "default": 24 }
+                }
             }),
         },
         Tool {

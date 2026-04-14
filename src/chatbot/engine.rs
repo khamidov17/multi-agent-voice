@@ -99,6 +99,8 @@ pub struct ChatbotEngine {
     is_processing: Arc<AtomicBool>,
     /// Direct inject handle — usable without holding the ClaudeCode mutex.
     inject_handle: Arc<std::sync::Mutex<std::sync::mpsc::Sender<String>>>,
+    /// Performance metrics collector.
+    pub metrics: Arc<crate::chatbot::metrics::MetricsCollector>,
 }
 
 impl ChatbotEngine {
@@ -134,6 +136,7 @@ impl ChatbotEngine {
             pending: Arc::new(Mutex::new(Vec::new())),
             is_processing: Arc::new(AtomicBool::new(false)),
             inject_handle,
+            metrics: Arc::new(crate::chatbot::metrics::MetricsCollector::new()),
         }
     }
 
@@ -153,6 +156,7 @@ impl ChatbotEngine {
         let pending = self.pending.clone();
         let is_processing = self.is_processing.clone();
         let inject_handle = self.inject_handle.clone();
+        let metrics = self.metrics.clone();
 
         // Notify used by the debouncer callback to request a re-trigger
         // after CC STOP when pending tasks remain. A watcher task (spawned
@@ -171,6 +175,7 @@ impl ChatbotEngine {
                 let pending = pending.clone();
                 let is_processing = is_processing.clone();
                 let inject_handle = inject_handle.clone();
+                let metrics = metrics.clone();
                 let retrigger = retrigger_inner.clone();
 
                 info!("Debouncer fired");
@@ -205,7 +210,7 @@ impl ChatbotEngine {
                             tokio::time::Duration::from_secs(timeout_secs),
                             process_messages(
                                 &config, &context, &database, &telegram, &claude, &pending,
-                                &messages,
+                                &messages, &metrics,
                             ),
                         )
                         .await;
@@ -214,6 +219,9 @@ impl ChatbotEngine {
                             Ok(Ok(())) => {}
                             Ok(Err(e)) => error!("Process error: {}", e),
                             Err(_) => {
+                                metrics
+                                    .cc_turns_timed_out
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 error!("Processing timed out after {}s — aborting", timeout_secs);
                                 // Reset Claude to a clean state so the next message starts fresh.
                                 {
@@ -398,6 +406,26 @@ impl ChatbotEngine {
                 self.config.shared_bot_messages_db.clone(),
             );
             info!("Health monitor started for {}", self.config.bot_name);
+        }
+
+        // Start metrics flush task (every 5 minutes)
+        {
+            let metrics_ref = self.metrics.clone();
+            let db_ref = self.database.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(300));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                interval.tick().await; // skip first
+                loop {
+                    interval.tick().await;
+                    let db = db_ref.lock().await;
+                    let conn = db.connection().lock().unwrap();
+                    if let Err(e) = metrics_ref.flush_to_db(&conn) {
+                        error!("Metrics flush failed: {e}");
+                    }
+                }
+            });
+            info!("Metrics flush task started (5min interval)");
         }
 
         // Start cognitive loop — autonomous background thinking
@@ -630,7 +658,15 @@ async fn process_messages(
     claude: &Mutex<ClaudeCode>,
     pending: &tokio::sync::Mutex<Vec<ChatMessage>>,
     messages: &[ChatMessage],
+    metrics: &Arc<crate::chatbot::metrics::MetricsCollector>,
 ) -> Result<(), String> {
+    // Increment messages processed
+    metrics
+        .messages_processed
+        .fetch_add(messages.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .cc_turns_total
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Collect images from messages
     let images: Vec<_> = messages
         .iter()

@@ -42,6 +42,11 @@ pub struct Database {
 }
 
 impl Database {
+    /// Get a reference to the underlying SQLite connection (for metrics flush etc.).
+    pub fn connection(&self) -> &Mutex<Connection> {
+        &self.conn
+    }
+
     /// Create a new in-memory database.
     pub fn new() -> Self {
         let conn = Connection::open_in_memory().expect("Failed to create in-memory database");
@@ -275,6 +280,62 @@ impl Database {
                 bot_name        TEXT PRIMARY KEY,
                 last_heartbeat  TEXT NOT NULL,
                 iteration_count INTEGER DEFAULT 0
+            );
+
+            -- Self-evaluations (periodic agent performance assessment)
+            CREATE TABLE IF NOT EXISTS self_evaluations (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                period_start        TEXT NOT NULL,
+                period_end          TEXT NOT NULL,
+                messages_handled    INTEGER,
+                tasks_completed     INTEGER,
+                tasks_failed        INTEGER,
+                avg_quality         REAL,
+                top_failure_modes   TEXT,
+                improvement_actions TEXT,
+                score               REAL,
+                created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Conversation journal (structured long-term memory)
+            CREATE TABLE IF NOT EXISTS journal (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id         TEXT,
+                entry_type      TEXT NOT NULL,
+                summary         TEXT NOT NULL,
+                detail          TEXT NOT NULL,
+                participants    TEXT NOT NULL DEFAULT '[]',
+                tags            TEXT NOT NULL DEFAULT '[]',
+                created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_journal_task ON journal(task_id);
+            CREATE INDEX IF NOT EXISTS idx_journal_type ON journal(entry_type);
+            CREATE INDEX IF NOT EXISTS idx_journal_created ON journal(created_at);
+
+            -- Post-task reflections (lessons learned, per-bot)
+            CREATE TABLE IF NOT EXISTS reflections (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id         TEXT,
+                outcome         TEXT NOT NULL,
+                what_worked     TEXT NOT NULL,
+                what_failed     TEXT NOT NULL,
+                lessons         TEXT NOT NULL,
+                created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Metrics: periodic performance snapshots
+            CREATE TABLE IF NOT EXISTS metrics_snapshots (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp           TEXT NOT NULL DEFAULT (datetime('now')),
+                messages_processed  INTEGER,
+                tool_calls_total    INTEGER,
+                tool_calls_failed   INTEGER,
+                avg_tool_latency_ms INTEGER,
+                cc_turns_total      INTEGER,
+                cc_turns_timed_out  INTEGER,
+                spam_detected       INTEGER,
+                errors_total        INTEGER,
+                tool_stats_json     TEXT
             );
 
             -- Operations: channel post rate limiting

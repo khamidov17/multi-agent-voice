@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -323,6 +324,211 @@ pub(crate) async fn execute_tool(
             status_note,
         } => execute_checkpoint_task(config, task_id, checkpoint, status_note).await,
         ToolCall::ResumeTask { task_id } => execute_resume_task(config, task_id).await,
+        ToolCall::GetMetrics { last_n } => execute_get_metrics(database, *last_n).await,
+        ToolCall::CreatePlan { task_id, steps } => {
+            execute_create_plan(config, task_id, steps).await
+        }
+        ToolCall::UpdatePlanStep {
+            plan_id,
+            step_index,
+            status,
+            result,
+        } => {
+            execute_update_plan_step(config, plan_id, *step_index, status, result.as_deref()).await
+        }
+        ToolCall::RevisePlan {
+            plan_id,
+            revised_steps,
+            reason,
+        } => execute_revise_plan(config, plan_id, revised_steps, reason).await,
+        ToolCall::VerifyHttp {
+            url,
+            method,
+            expected_status,
+            body_contains,
+            timeout_secs,
+        } => {
+            let probe = crate::chatbot::verify::HttpProbe {
+                url: url.clone(),
+                method: method.clone().unwrap_or_else(|| "GET".to_string()),
+                expected_status: expected_status.unwrap_or(200),
+                body_contains: body_contains.clone(),
+                timeout_secs: timeout_secs.unwrap_or(10),
+            };
+            let result = crate::chatbot::verify::run_http_probe(&probe).await;
+            Ok(Some(
+                serde_json::to_string_pretty(&result).unwrap_or_default(),
+            ))
+        }
+        ToolCall::VerifyProcess {
+            command,
+            args,
+            expected_exit_code,
+            stdout_contains,
+            timeout_secs,
+        } => {
+            if !config.full_permissions {
+                Err("verify_process requires full permissions (Tier 1 only)".to_string())
+            } else {
+                let probe = crate::chatbot::verify::ProcessProbe {
+                    command: command.clone(),
+                    args: args.clone(),
+                    expected_exit_code: expected_exit_code.unwrap_or(0),
+                    stdout_contains: stdout_contains.clone(),
+                    timeout_secs: timeout_secs.unwrap_or(30),
+                };
+                let result = crate::chatbot::verify::run_process_probe(&probe).await;
+                Ok(Some(
+                    serde_json::to_string_pretty(&result).unwrap_or_default(),
+                ))
+            }
+        }
+        ToolCall::VerifyLogs {
+            log_file,
+            error_patterns,
+            since_minutes,
+        } => {
+            let data_dir = match config.data_dir.as_ref() {
+                Some(d) => d,
+                None => {
+                    return ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: Some("No data_dir configured".to_string()),
+                        is_error: true,
+                        image: None,
+                    };
+                }
+            };
+            let result = crate::chatbot::verify::run_log_probe(
+                data_dir,
+                log_file,
+                error_patterns,
+                since_minutes.unwrap_or(5),
+            );
+            Ok(Some(
+                serde_json::to_string_pretty(&result).unwrap_or_default(),
+            ))
+        }
+        ToolCall::DelegateTask {
+            to_agent,
+            task_description,
+            success_criteria,
+            deadline_minutes,
+            priority,
+        } => {
+            execute_delegate_task(
+                config,
+                to_agent,
+                task_description,
+                success_criteria,
+                *deadline_minutes,
+                priority.as_deref(),
+            )
+            .await
+        }
+        ToolCall::RespondToHandoff {
+            handoff_id,
+            action,
+            result_or_reason,
+        } => {
+            execute_respond_to_handoff(config, *handoff_id, action, result_or_reason.as_deref())
+                .await
+        }
+        ToolCall::RequestConsensus {
+            action_type,
+            description,
+            timeout_minutes,
+        } => execute_request_consensus(config, action_type, description, *timeout_minutes).await,
+        ToolCall::VoteConsensus {
+            request_id,
+            decision,
+            reason,
+        } => execute_vote_consensus(config, *request_id, decision, reason).await,
+        ToolCall::ListTools {} => execute_list_tools().await,
+        ToolCall::BuildTool {
+            name,
+            description,
+            language,
+            code,
+            parameters,
+        } => {
+            execute_build_tool(
+                config,
+                name,
+                description,
+                language,
+                code,
+                parameters.as_deref(),
+            )
+            .await
+        }
+        ToolCall::RunCustomTool {
+            name,
+            input_json,
+            timeout_secs,
+        } => execute_run_custom_tool(config, name, input_json.as_deref(), *timeout_secs).await,
+        ToolCall::Reflect {
+            task_id,
+            outcome,
+            what_worked,
+            what_failed,
+            lessons,
+        } => {
+            execute_reflect(
+                config,
+                database,
+                task_id.as_deref(),
+                outcome,
+                what_worked,
+                what_failed,
+                lessons,
+            )
+            .await
+        }
+        ToolCall::SelfEvaluate {
+            score,
+            top_failure_modes,
+            improvement_actions,
+            notes,
+        } => {
+            execute_self_evaluate(
+                config,
+                database,
+                *score,
+                top_failure_modes,
+                improvement_actions,
+                notes.as_deref(),
+            )
+            .await
+        }
+        ToolCall::JournalLog {
+            entry_type,
+            summary,
+            detail,
+            task_id,
+            tags,
+        } => {
+            execute_journal_log(
+                database,
+                entry_type,
+                summary,
+                detail.as_deref(),
+                task_id.as_deref(),
+                tags.as_deref(),
+            )
+            .await
+        }
+        ToolCall::JournalSearch {
+            query,
+            entry_type: _,
+            task_id,
+            last_hours: _,
+            limit,
+        } => execute_journal_search(database, query, task_id.as_deref(), limit.unwrap_or(10)).await,
+        ToolCall::JournalSummary {
+            task_id,
+            last_hours,
+        } => execute_journal_summary(database, task_id.as_deref(), last_hours.unwrap_or(24)).await,
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
     };
@@ -2081,4 +2287,832 @@ async fn execute_resume_task(
     Ok(Some(
         serde_json::to_string_pretty(&result).unwrap_or_default(),
     ))
+}
+
+/// Get system performance metrics (GetMetrics tool).
+async fn execute_get_metrics(
+    database: &Mutex<Database>,
+    last_n: u64,
+) -> Result<Option<String>, String> {
+    let db = database.lock().await;
+    let conn = db.connection().lock().unwrap();
+    let snapshots = crate::chatbot::metrics::get_recent_snapshots(&conn, last_n);
+    if snapshots.is_empty() {
+        return Ok(Some(
+            "No metrics data yet. Metrics are flushed every 5 minutes.".to_string(),
+        ));
+    }
+    Ok(Some(crate::chatbot::metrics::format_metrics_summary(
+        &snapshots,
+    )))
+}
+
+/// Create a structured plan (CreatePlan tool).
+async fn execute_create_plan(
+    config: &ChatbotConfig,
+    task_id: &str,
+    steps_json: &str,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    let step_inputs: Vec<crate::chatbot::planner::PlanStepInput> =
+        serde_json::from_str(steps_json).map_err(|e| format!("Invalid steps JSON: {e}"))?;
+
+    if step_inputs.is_empty() {
+        return Err("Plan must have at least one step".to_string());
+    }
+
+    let plan = crate::chatbot::planner::create_plan(&db.conn, task_id, &step_inputs)
+        .map_err(|e| format!("Failed to create plan: {e}"))?;
+
+    let summary = format!(
+        "Plan created: {} ({} steps)\nSteps:\n{}",
+        plan.id,
+        plan.steps.len(),
+        plan.steps
+            .iter()
+            .map(|s| format!(
+                "  {}. {} [verify: {}]",
+                s.index, s.description, s.verification
+            ))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+
+    Ok(Some(summary))
+}
+
+/// Update a plan step status (UpdatePlanStep tool).
+async fn execute_update_plan_step(
+    config: &ChatbotConfig,
+    plan_id: &str,
+    step_index: usize,
+    status: &str,
+    result: Option<&str>,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    let mut plan = crate::chatbot::planner::get_plan(&db.conn, plan_id)
+        .map_err(|e| format!("Failed to load plan: {e}"))?
+        .ok_or_else(|| format!("Plan {} not found", plan_id))?;
+
+    if step_index >= plan.steps.len() {
+        return Err(format!(
+            "Step index {} out of range (plan has {} steps)",
+            step_index,
+            plan.steps.len()
+        ));
+    }
+
+    plan.steps[step_index].status = match status {
+        "done" => crate::chatbot::planner::StepStatus::Done,
+        "failed" => crate::chatbot::planner::StepStatus::Failed,
+        "skipped" => crate::chatbot::planner::StepStatus::Skipped,
+        _ => return Err(format!("Invalid status: {status}")),
+    };
+    plan.steps[step_index].result = result.map(|s| s.to_string());
+
+    // Auto-advance: if all steps done, move to verifying
+    if plan.all_steps_done() {
+        plan.status = crate::chatbot::planner::PlanStatus::Done;
+    } else if plan.has_failed_step() {
+        plan.status = crate::chatbot::planner::PlanStatus::Verifying;
+    }
+
+    crate::chatbot::planner::update_plan(&db.conn, &plan)
+        .map_err(|e| format!("Failed to update plan: {e}"))?;
+
+    let next = plan.next_ready_step();
+    let msg = format!(
+        "Step {} marked as {}. Plan status: {}. {}",
+        step_index,
+        status,
+        plan.status,
+        if let Some(n) = next {
+            format!("Next ready step: {}", n)
+        } else {
+            "No more steps pending.".to_string()
+        },
+    );
+    Ok(Some(msg))
+}
+
+/// Revise a plan after failure (RevisePlan tool).
+async fn execute_revise_plan(
+    config: &ChatbotConfig,
+    plan_id: &str,
+    revised_steps_json: &str,
+    reason: &str,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    let mut plan = crate::chatbot::planner::get_plan(&db.conn, plan_id)
+        .map_err(|e| format!("Failed to load plan: {e}"))?
+        .ok_or_else(|| format!("Plan {} not found", plan_id))?;
+
+    if plan.iteration >= plan.max_iterations {
+        return Err(format!(
+            "Plan {} has reached max revisions ({}). Consider a fundamentally different approach.",
+            plan_id, plan.max_iterations
+        ));
+    }
+
+    let step_inputs: Vec<crate::chatbot::planner::PlanStepInput> =
+        serde_json::from_str(revised_steps_json)
+            .map_err(|e| format!("Invalid revised steps JSON: {e}"))?;
+
+    plan.steps = step_inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| crate::chatbot::planner::PlanStep {
+            index: i,
+            description: input.description.clone(),
+            verification: input.verification.clone(),
+            status: crate::chatbot::planner::StepStatus::Pending,
+            result: None,
+            depends_on: input.depends_on.clone(),
+        })
+        .collect();
+
+    plan.iteration += 1;
+    plan.current_step = 0;
+    plan.status = crate::chatbot::planner::PlanStatus::Executing;
+
+    crate::chatbot::planner::update_plan(&db.conn, &plan)
+        .map_err(|e| format!("Failed to update plan: {e}"))?;
+
+    Ok(Some(format!(
+        "Plan {} revised (iteration {}). Reason: {}. {} new steps.",
+        plan_id,
+        plan.iteration,
+        reason,
+        plan.steps.len()
+    )))
+}
+
+/// Formally delegate work to another agent (DelegateTask tool).
+async fn execute_delegate_task(
+    config: &ChatbotConfig,
+    to_agent: &str,
+    task_description: &str,
+    success_criteria: &str,
+    deadline_minutes: Option<u64>,
+    priority: Option<&str>,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    // Create task in shared board
+    let task_id = format!("task-{}", chrono::Utc::now().timestamp_millis());
+    let pri = match priority {
+        Some("high") => 3,
+        Some("medium") => 2,
+        _ => 1,
+    };
+    db.create_task(
+        &task_id,
+        task_description,
+        &config.bot_name,
+        Some(task_description),
+        pri,
+    )
+    .map_err(|e| format!("Task creation failed: {e}"))?;
+
+    // Create handoff contract
+    let payload = serde_json::json!({
+        "task_description": task_description,
+        "success_criteria": success_criteria,
+        "deadline_minutes": deadline_minutes,
+        "priority": priority.unwrap_or("medium"),
+    });
+    let handoff_id = db
+        .create_handoff(
+            &config.bot_name,
+            to_agent,
+            &task_id,
+            "delegate",
+            &payload.to_string(),
+        )
+        .map_err(|e| format!("Handoff creation failed: {e}"))?;
+
+    // Send notification via bot_messages
+    let notification = format!(
+        "[HANDOFF:{}] {} delegates to {}: {}",
+        handoff_id, config.bot_name, to_agent, task_description
+    );
+    let _ = db.insert(&config.bot_name, Some(to_agent), &notification, None, None);
+
+    info!(
+        "Delegated to {}: {} (handoff_id={}, task_id={})",
+        to_agent, task_description, handoff_id, task_id
+    );
+
+    Ok(Some(format!(
+        "Delegated to {} (handoff_id={}, task_id={}). They'll receive a [HANDOFF:{}] notification.",
+        to_agent, handoff_id, task_id, handoff_id
+    )))
+}
+
+/// Respond to a handoff: accept, complete, or reject (RespondToHandoff tool).
+async fn execute_respond_to_handoff(
+    config: &ChatbotConfig,
+    handoff_id: i64,
+    action: &str,
+    result_or_reason: Option<&str>,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    let handoff = db
+        .get_handoff(handoff_id)
+        .map_err(|e| format!("Query failed: {e}"))?
+        .ok_or_else(|| format!("Handoff {} not found", handoff_id))?;
+
+    match action {
+        "accept" => {
+            let ok = db
+                .accept_handoff(handoff_id, &config.bot_name)
+                .map_err(|e| format!("Accept failed: {e}"))?;
+            if !ok {
+                return Err(format!(
+                    "Cannot accept handoff {} — it's assigned to {}, not {}",
+                    handoff_id, handoff.to_agent, config.bot_name
+                ));
+            }
+            let notif = format!(
+                "[HANDOFF_ACCEPTED:{}] {} accepted the delegation",
+                handoff_id, config.bot_name
+            );
+            let _ = db.insert(
+                &config.bot_name,
+                Some(&handoff.from_agent),
+                &notif,
+                None,
+                None,
+            );
+            Ok(Some(format!(
+                "Accepted handoff {}. Now working on it.",
+                handoff_id
+            )))
+        }
+        "complete" => {
+            let result_text = result_or_reason.unwrap_or("Completed");
+            db.complete_handoff(handoff_id, &config.bot_name, result_text)
+                .map_err(|e| format!("Complete failed: {e}"))?;
+            let notif = format!(
+                "[HANDOFF_COMPLETE:{}] {} completed: {}",
+                handoff_id, config.bot_name, result_text
+            );
+            let _ = db.insert(
+                &config.bot_name,
+                Some(&handoff.from_agent),
+                &notif,
+                None,
+                None,
+            );
+            Ok(Some(format!(
+                "Handoff {} completed. Notified {}.",
+                handoff_id, handoff.from_agent
+            )))
+        }
+        "reject" => {
+            let reason = result_or_reason.unwrap_or("No reason given");
+            db.reject_handoff(handoff_id, &config.bot_name, reason)
+                .map_err(|e| format!("Reject failed: {e}"))?;
+            let notif = format!(
+                "[HANDOFF_REJECTED:{}] {} rejected: {}",
+                handoff_id, config.bot_name, reason
+            );
+            let _ = db.insert(
+                &config.bot_name,
+                Some(&handoff.from_agent),
+                &notif,
+                None,
+                None,
+            );
+            Ok(Some(format!(
+                "Handoff {} rejected. Notified {}.",
+                handoff_id, handoff.from_agent
+            )))
+        }
+        _ => Err(format!(
+            "Invalid action: {}. Use accept/complete/reject.",
+            action
+        )),
+    }
+}
+
+/// Request consensus from other agents (RequestConsensus tool).
+async fn execute_request_consensus(
+    config: &ChatbotConfig,
+    action_type: &str,
+    description: &str,
+    timeout_minutes: Option<u64>,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    // Determine required approvers based on action type
+    let required: Vec<String> = match action_type {
+        "deploy" => vec!["Security".to_string()],
+        "ban" => vec!["Nova".to_string()],
+        "config_change" => vec!["Nova".to_string(), "Security".to_string()],
+        "tool_build" => vec!["Security".to_string()],
+        "plan_approve" => vec!["Security".to_string()],
+        _ => vec!["Security".to_string()], // default: security review
+    };
+
+    let timeout = timeout_minutes.unwrap_or(10);
+    let request_id = db
+        .request_consensus(
+            &config.bot_name,
+            action_type,
+            description,
+            &required,
+            timeout,
+        )
+        .map_err(|e| format!("Consensus request failed: {e}"))?;
+
+    // Notify each required approver
+    for approver in &required {
+        let notif = format!(
+            "[CONSENSUS_REQUEST:{}] {} wants to {}: {}. Approve or reject using vote_consensus.",
+            request_id, config.bot_name, action_type, description
+        );
+        let _ = db.insert(&config.bot_name, Some(approver), &notif, None, None);
+    }
+
+    Ok(Some(format!(
+        "Consensus request #{} created. Waiting for approval from: {}. Timeout: {}min.",
+        request_id,
+        required.join(", "),
+        timeout,
+    )))
+}
+
+/// Vote on a consensus request (VoteConsensus tool).
+async fn execute_vote_consensus(
+    config: &ChatbotConfig,
+    request_id: i64,
+    decision: &str,
+    reason: &str,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    let status = db
+        .vote_on_consensus(request_id, &config.bot_name, decision, reason)
+        .map_err(|e| format!("Vote failed: {e}"))?;
+
+    // Get requesting agent to notify them
+    let requesting_agent: String = db
+        .conn
+        .query_row(
+            "SELECT requesting_agent FROM consensus_requests WHERE id = ?1",
+            rusqlite::params![request_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+
+    let result_msg = match status {
+        crate::chatbot::bot_messages::ConsensusStatus::Approved => {
+            let notif = format!(
+                "[CONSENSUS_APPROVED:{}] Your action was approved. Proceed.",
+                request_id
+            );
+            let _ = db.insert(
+                &config.bot_name,
+                Some(&requesting_agent),
+                &notif,
+                None,
+                None,
+            );
+            format!(
+                "Consensus #{} APPROVED. Notified {}.",
+                request_id, requesting_agent
+            )
+        }
+        crate::chatbot::bot_messages::ConsensusStatus::Rejected(ref r) => {
+            let notif = format!(
+                "[CONSENSUS_REJECTED:{}] Action rejected. Reason: {}",
+                request_id, r
+            );
+            let _ = db.insert(
+                &config.bot_name,
+                Some(&requesting_agent),
+                &notif,
+                None,
+                None,
+            );
+            format!(
+                "Consensus #{} REJECTED. Reason: {}. Notified {}.",
+                request_id, r, requesting_agent
+            )
+        }
+        crate::chatbot::bot_messages::ConsensusStatus::Pending => {
+            format!(
+                "Vote recorded on #{} ({}). Waiting for more votes.",
+                request_id, decision
+            )
+        }
+        crate::chatbot::bot_messages::ConsensusStatus::Expired => {
+            format!("Consensus #{} has expired.", request_id)
+        }
+    };
+
+    Ok(Some(result_msg))
+}
+
+/// List all registered custom tools (ListTools).
+async fn execute_list_tools() -> Result<Option<String>, String> {
+    let workspace = std::path::Path::new("workspace");
+    let tools = crate::chatbot::tool_registry::load_registry(workspace);
+    if tools.is_empty() {
+        return Ok(Some(
+            "No custom tools registered yet. Use build_tool to create one.".to_string(),
+        ));
+    }
+    let mut lines = vec![format!("{} registered tools:", tools.len())];
+    for t in &tools {
+        lines.push(format!("  - {} ({}) — {}", t.name, t.path, t.description));
+    }
+    Ok(Some(lines.join("\n")))
+}
+
+/// Build and register a new custom tool (BuildTool). Tier 1 only.
+async fn execute_build_tool(
+    config: &ChatbotConfig,
+    name: &str,
+    description: &str,
+    language: &str,
+    code: &str,
+    parameters: Option<&str>,
+) -> Result<Option<String>, String> {
+    if !config.full_permissions {
+        return Err("build_tool requires full permissions (Tier 1 only)".to_string());
+    }
+
+    if !crate::chatbot::tool_registry::validate_tool_name(name) {
+        return Err(
+            "Invalid tool name. Use only alphanumeric + underscore, max 64 chars.".to_string(),
+        );
+    }
+
+    let ext = match language {
+        "python" => "py",
+        "bash" => "sh",
+        _ => {
+            return Err(format!(
+                "Unsupported language: {}. Use 'python' or 'bash'.",
+                language
+            ));
+        }
+    };
+
+    let workspace = std::path::Path::new("workspace");
+    let tools_dir = workspace.join("tools");
+    std::fs::create_dir_all(&tools_dir).map_err(|e| format!("Failed to create tools dir: {e}"))?;
+
+    let script_path = tools_dir.join(format!("{name}.{ext}"));
+    std::fs::write(&script_path, code).map_err(|e| format!("Failed to write script: {e}"))?;
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
+    }
+
+    let rel_path = format!("workspace/tools/{name}.{ext}");
+    let entry = crate::chatbot::tool_registry::ToolRegistryEntry {
+        name: name.to_string(),
+        path: rel_path.clone(),
+        description: description.to_string(),
+        created_by: config.bot_name.clone(),
+        parameters_json: parameters.map(|s| s.to_string()),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    crate::chatbot::tool_registry::register_tool(workspace, entry)
+        .map_err(|e| format!("Registration failed: {e}"))?;
+
+    // Broadcast to all agents
+    if let Some(ref db_path) = config.shared_bot_messages_db {
+        if let Ok(db) = crate::chatbot::bot_messages::BotMessageDb::open(db_path) {
+            let _ = db.insert_typed(
+                &config.bot_name,
+                None,
+                &format!(
+                    "NEW_TOOL: I built '{}' — {}. Use run_custom_tool to try it.",
+                    name, description
+                ),
+                crate::chatbot::bot_messages::message_type::STATUS,
+                None,
+                None,
+            );
+        }
+    }
+
+    info!("Built tool: {} at {}", name, rel_path);
+    Ok(Some(format!(
+        "Tool '{}' built and registered at {}. All agents notified.",
+        name, rel_path
+    )))
+}
+
+/// Run a registered custom tool (RunCustomTool). Tier 1 only.
+async fn execute_run_custom_tool(
+    config: &ChatbotConfig,
+    name: &str,
+    input_json: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> Result<Option<String>, String> {
+    if !config.full_permissions {
+        return Err("run_custom_tool requires full permissions (Tier 1 only)".to_string());
+    }
+
+    let workspace = std::path::Path::new("workspace");
+    let tool = crate::chatbot::tool_registry::find_tool(workspace, name).ok_or_else(|| {
+        format!(
+            "Tool '{}' not found in registry. Use list_tools to see available.",
+            name
+        )
+    })?;
+
+    let path = std::path::Path::new(&tool.path);
+    if !path.exists() {
+        return Err(format!("Tool script not found at: {}", tool.path));
+    }
+
+    let timeout = timeout_secs.unwrap_or(60).min(300);
+    let interpreter = if tool.path.ends_with(".py") {
+        "python3"
+    } else {
+        "bash"
+    };
+
+    let mut cmd = tokio::process::Command::new(interpreter);
+    cmd.arg(&tool.path);
+    if let Some(input) = input_json {
+        cmd.arg(input);
+    }
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let output = tokio::time::timeout(Duration::from_secs(timeout), cmd.output())
+        .await
+        .map_err(|_| format!("Tool '{}' timed out after {}s", name, timeout))?
+        .map_err(|e| format!("Failed to run tool: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    Ok(Some(format!(
+        "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
+        exit_code,
+        if stdout.len() > 4000 {
+            &stdout[..4000]
+        } else {
+            &stdout
+        },
+        if stderr.len() > 2000 {
+            &stderr[..2000]
+        } else {
+            &stderr
+        },
+    )))
+}
+
+/// Log a post-task reflection (Reflect tool).
+async fn execute_reflect(
+    config: &ChatbotConfig,
+    database: &Mutex<Database>,
+    task_id: Option<&str>,
+    outcome: &str,
+    what_worked_json: &str,
+    what_failed_json: &str,
+    lessons_json: &str,
+) -> Result<Option<String>, String> {
+    let what_worked: Vec<String> = serde_json::from_str(what_worked_json).unwrap_or_default();
+    let what_failed: Vec<String> = serde_json::from_str(what_failed_json).unwrap_or_default();
+    let lessons: Vec<String> = serde_json::from_str(lessons_json).unwrap_or_default();
+
+    if lessons.is_empty() {
+        return Err("Reflection must include at least one lesson. Be specific.".to_string());
+    }
+
+    let reflection = crate::chatbot::reflection::Reflection {
+        task_id: task_id.map(|s| s.to_string()),
+        outcome: outcome.to_string(),
+        what_worked,
+        what_failed,
+        lessons: lessons.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+
+    // Save to database
+    let db = database.lock().await;
+    crate::chatbot::reflection::save_reflection(db.connection(), &reflection)
+        .map_err(|e| format!("Failed to save reflection: {e}"))?;
+    drop(db);
+
+    // Write to journal file
+    if let Some(ref data_dir) = config.data_dir {
+        let _ = crate::chatbot::reflection::write_reflection_journal(data_dir, &reflection);
+    }
+
+    Ok(Some(format!(
+        "Reflection logged: {} — {} lesson(s). These will be auto-injected into your prompt.",
+        outcome,
+        lessons.len(),
+    )))
+}
+
+/// Record periodic self-evaluation (SelfEvaluate tool).
+async fn execute_self_evaluate(
+    config: &ChatbotConfig,
+    database: &Mutex<Database>,
+    score: f32,
+    top_failure_modes_json: &str,
+    improvement_actions_json: &str,
+    notes: Option<&str>,
+) -> Result<Option<String>, String> {
+    let score = score.clamp(1.0, 10.0);
+    let failure_modes: Vec<String> =
+        serde_json::from_str(top_failure_modes_json).unwrap_or_default();
+    let actions: Vec<String> = serde_json::from_str(improvement_actions_json).unwrap_or_default();
+
+    let now = chrono::Utc::now();
+    let eval = crate::chatbot::self_eval::Evaluation {
+        period_start: (now - chrono::Duration::hours(24)).to_rfc3339(),
+        period_end: now.to_rfc3339(),
+        messages_handled: 0, // filled by compute_eval_data, but we save what the bot reports
+        tasks_completed: 0,
+        tasks_failed: 0,
+        avg_response_quality: score,
+        top_failure_modes: failure_modes.clone(),
+        improvement_actions: actions.clone(),
+        score,
+    };
+
+    let db = database.lock().await;
+    crate::chatbot::self_eval::save_evaluation(db.connection(), &eval)
+        .map_err(|e| format!("Failed to save evaluation: {e}"))?;
+    drop(db);
+
+    // Write to journal
+    if let Some(ref data_dir) = config.data_dir {
+        let eval_dir = data_dir.join("memories").join("reflections");
+        let _ = std::fs::create_dir_all(&eval_dir);
+        let eval_path = eval_dir.join("self_eval.md");
+        let entry = format!(
+            "\n## Self-Eval {}\nScore: {:.1}/10\nFailure modes: {}\nActions: {}\n{}\n",
+            now.format("%Y-%m-%d %H:%M"),
+            score,
+            failure_modes.join(", "),
+            actions.join(", "),
+            notes.unwrap_or(""),
+        );
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&eval_path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(entry.as_bytes())
+            });
+    }
+
+    // Get trend for response
+    let db = database.lock().await;
+    let trend = crate::chatbot::self_eval::get_score_trend(db.connection(), 5);
+    drop(db);
+
+    let trend_str: Vec<String> = trend.iter().map(|s| format!("{:.1}", s)).collect();
+
+    Ok(Some(format!(
+        "Self-evaluation recorded: {:.1}/10. Trend: {}. {} failure modes, {} improvement actions.",
+        score,
+        trend_str.join(" → "),
+        failure_modes.len(),
+        actions.len(),
+    )))
+}
+
+/// Log a journal entry (JournalLog tool).
+async fn execute_journal_log(
+    database: &Mutex<Database>,
+    entry_type: &str,
+    summary: &str,
+    detail: Option<&str>,
+    task_id: Option<&str>,
+    tags_json: Option<&str>,
+) -> Result<Option<String>, String> {
+    let tags: Vec<String> = tags_json
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    let db = database.lock().await;
+    let id = crate::chatbot::journal::add_entry(
+        db.connection(),
+        task_id,
+        entry_type,
+        summary,
+        detail.unwrap_or(summary),
+        &[],
+        &tags,
+    )
+    .map_err(|e| format!("Journal log failed: {e}"))?;
+
+    Ok(Some(format!(
+        "Journal entry #{} logged: [{}] {}",
+        id, entry_type, summary
+    )))
+}
+
+/// Search journal entries (JournalSearch tool).
+async fn execute_journal_search(
+    database: &Mutex<Database>,
+    query: &str,
+    task_id: Option<&str>,
+    limit: u64,
+) -> Result<Option<String>, String> {
+    let db = database.lock().await;
+    let entries = if let Some(tid) = task_id {
+        crate::chatbot::journal::get_journal_for_task(db.connection(), tid)
+    } else {
+        crate::chatbot::journal::search_journal(db.connection(), query, limit)
+    };
+
+    if entries.is_empty() {
+        return Ok(Some(format!("No journal entries matching '{}'.", query)));
+    }
+
+    let mut lines = vec![format!("Found {} entries:", entries.len())];
+    for e in &entries {
+        let ts = e.created_at.get(..16).unwrap_or(&e.created_at);
+        lines.push(format!("[{}] {}: {}", ts, e.entry_type, e.summary));
+    }
+    Ok(Some(lines.join("\n")))
+}
+
+/// Get journal summary timeline (JournalSummary tool).
+async fn execute_journal_summary(
+    database: &Mutex<Database>,
+    task_id: Option<&str>,
+    last_hours: u64,
+) -> Result<Option<String>, String> {
+    let db = database.lock().await;
+    let entries = if let Some(tid) = task_id {
+        crate::chatbot::journal::get_journal_for_task(db.connection(), tid)
+    } else {
+        crate::chatbot::journal::get_recent_entries(db.connection(), last_hours, 50)
+    };
+
+    if entries.is_empty() {
+        return Ok(Some("No journal entries in this period.".to_string()));
+    }
+
+    Ok(Some(crate::chatbot::journal::format_task_timeline(
+        &entries,
+    )))
 }
