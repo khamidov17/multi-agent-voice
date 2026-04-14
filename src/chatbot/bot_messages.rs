@@ -790,6 +790,49 @@ impl BotMessageDb {
 
     // -----------------------------------------------------------------------
     // Progress ledger
+    // ── Health-aware routing ────────────────────────────────────────────
+
+    /// Check if a bot is alive (heartbeat within last `max_stale_secs`).
+    pub fn is_bot_alive(&self, bot_name: &str, max_stale_secs: u64) -> bool {
+        let result: rusqlite::Result<String> = self.conn.query_row(
+            "SELECT last_heartbeat FROM heartbeats WHERE bot_name = ?1",
+            params![bot_name],
+            |r| r.get(0),
+        );
+        match result {
+            Ok(ts) => crate::chatbot::health::parse_sqlite_datetime_age_secs(&ts)
+                .map(|age| age <= max_stale_secs)
+                .unwrap_or(false),
+            Err(_) => false, // no heartbeat entry = not alive
+        }
+    }
+
+    /// Get workflows that are paused waiting for a specific agent.
+    pub fn get_paused_workflows_for(
+        &self,
+        agent: &str,
+    ) -> anyhow::Result<Vec<crate::chatbot::workflow::Workflow>> {
+        // Load all paused workflows, then filter by current step's agent
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM workflows WHERE status IN ('paused', '\"paused\"')")?;
+        let ids: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut result = Vec::new();
+        for id in &ids {
+            if let Ok(wf) = crate::chatbot::workflow::load_workflow(&self.conn, id)
+                && wf.current_step < wf.steps.len()
+                && wf.steps[wf.current_step].agent == agent
+            {
+                result.push(wf);
+            }
+        }
+        Ok(result)
+    }
+
     // -----------------------------------------------------------------------
 
     /// Append an entry to the immutable progress audit ledger.
@@ -1173,9 +1216,11 @@ pub fn start_polling(
 
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut poll_count: u64 = 0;
 
         loop {
             interval.tick().await;
+            poll_count += 1;
 
             let messages = match db.unread_for(&this_bot) {
                 Ok(m) => m,
@@ -1228,6 +1273,49 @@ pub fn start_polling(
             debouncer.trigger().await;
             // Wake the event bus so any sleeping CC turn exits immediately.
             crate::chatbot::event_bus::global_event_bus().wake(&this_bot);
+
+            // Every ~30s (60 ticks at 500ms), check for paused workflows that
+            // were waiting for this bot to come back online.
+            if poll_count.is_multiple_of(60) {
+                match db.get_paused_workflows_for(&this_bot) {
+                    Ok(paused) => {
+                        for wf in &paused {
+                            info!(
+                                "Auto-resuming workflow {} — {} is back online",
+                                wf.id, this_bot
+                            );
+                            match crate::chatbot::workflow::advance_workflow(
+                                &db.conn,
+                                &wf.id,
+                                "agent_recovered",
+                                true,
+                                None,
+                            ) {
+                                Ok(crate::chatbot::workflow::AdvanceResult::NextStep {
+                                    ref agent,
+                                    ref message,
+                                }) => {
+                                    let _ = db.insert_typed(
+                                        &this_bot,
+                                        Some(agent),
+                                        message,
+                                        message_type::CHAT,
+                                        None,
+                                        None,
+                                    );
+                                }
+                                Ok(_) => {} // Completed or max iterations
+                                Err(e) => {
+                                    warn!("Failed to auto-resume workflow {}: {e}", wf.id);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to check paused workflows: {e}");
+                    }
+                }
+            }
         }
     });
 }

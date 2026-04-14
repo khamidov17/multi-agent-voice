@@ -124,6 +124,8 @@ pub enum AdvanceResult {
     Completed(Workflow),
     /// Hit max iterations on a verify loop.
     MaxIterations(Workflow),
+    /// Paused because target agent is offline. Auto-resumes when agent recovers.
+    Paused { reason: String },
 }
 
 // ─── SQLite persistence ─────────────────────────────────────────────────
@@ -357,6 +359,20 @@ pub fn advance_workflow(
         return Ok(AdvanceResult::Completed(wf));
     }
 
+    // Health check: is the target agent alive?
+    let next_agent = &wf.steps[wf.current_step].agent;
+    if !is_agent_alive(conn, next_agent, 300) {
+        wf.status = WorkflowStatus::Paused;
+        save_workflow(conn, &wf).map_err(|e| e.to_string())?;
+        let reason = format!(
+            "[WORKFLOW_STALLED:{}] Step '{}' needs {} but agent is offline. \
+             Workflow paused — will auto-resume when agent comes back.",
+            wf.id, wf.steps[wf.current_step].name, next_agent
+        );
+        info!("[workflow] {} paused — {} is offline", wf.id, next_agent);
+        return Ok(AdvanceResult::Paused { reason });
+    }
+
     // Start the next step
     wf.steps[wf.current_step].status = StepStatus::Running;
     save_workflow(conn, &wf).map_err(|e| e.to_string())?;
@@ -445,6 +461,37 @@ pub fn substitute_state_vars(template: &str, state: &serde_json::Value) -> Strin
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
+
+/// Check if an agent is alive by querying the heartbeats table.
+/// Returns `true` (assume alive) if the table doesn't exist or has no entry for this agent,
+/// since the agent may simply not have started sending heartbeats yet.
+fn is_agent_alive(conn: &rusqlite::Connection, agent: &str, max_stale_secs: u64) -> bool {
+    // Check if heartbeats table exists (may be missing in tests or fresh DBs)
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='heartbeats'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !table_exists {
+        return true; // no heartbeat tracking = assume alive
+    }
+
+    let result: rusqlite::Result<String> = conn.query_row(
+        "SELECT last_heartbeat FROM heartbeats WHERE bot_name = ?1",
+        rusqlite::params![agent],
+        |r| r.get(0),
+    );
+    match result {
+        Ok(ts) => crate::chatbot::health::parse_sqlite_datetime_age_secs(&ts)
+            .map(|age| age <= max_stale_secs)
+            .unwrap_or(true), // unparseable timestamp = assume alive
+        Err(rusqlite::Error::QueryReturnedNoRows) => true, // no entry = assume alive (not yet started)
+        Err(_) => true, // query error = assume alive (don't block on DB issues)
+    }
+}
 
 /// Find the last Execute step before `index`.
 fn find_last_execute_before(index: usize, steps: &[WorkflowStep]) -> usize {

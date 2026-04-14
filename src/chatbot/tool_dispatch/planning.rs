@@ -693,5 +693,21 @@ pub(super) async fn execute_complete_workflow_step(
                 wf.name, wf.max_iterations,
             )))
         }
+        crate::chatbot::workflow::AdvanceResult::Paused { reason } => {
+            // Alert via bot_messages so the owner/Nova sees it
+            let _ = db.insert_typed(
+                &config.bot_name,
+                None,
+                &reason,
+                crate::chatbot::bot_messages::message_type::STATUS,
+                None,
+                None,
+            );
+
+            Ok(Some(format!(
+                "Workflow paused: target agent is offline. Will auto-resume when agent comes back.\n{}",
+                reason,
+            )))
+        }
     }
 }

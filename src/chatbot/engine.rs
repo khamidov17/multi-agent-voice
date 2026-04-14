@@ -33,6 +33,44 @@ const MAX_ITERATIONS_QUICK: usize = 3;
 /// Maximum wall-clock time for the quick-response lane (seconds).
 const MAX_PROCESSING_SECS_QUICK: u64 = 30;
 
+/// Assign a priority to a message. Higher = more urgent.
+/// Used to sort the pending queue so important messages appear first in Claude's context.
+fn message_priority(msg: &ChatMessage, config: &ChatbotConfig) -> u8 {
+    // 100: Owner messages (highest priority)
+    if config.owner_user_id == Some(msg.user_id) {
+        return 100;
+    }
+    // 90: Workflow steps (code-enforced flow — don't delay)
+    if msg.text.starts_with("[WORKFLOW:") {
+        return 90;
+    }
+    // 80: Task resume (crash recovery — resume immediately)
+    if msg.text.starts_with("[SYSTEM] TASK_RESUME") {
+        return 80;
+    }
+    // 70: Handoffs (agent-to-agent delegation)
+    if msg.text.contains("[HANDOFF:") {
+        return 70;
+    }
+    // 60: Consensus requests
+    if msg.text.contains("[CONSENSUS_REQUEST:") {
+        return 60;
+    }
+    // 50: Normal user messages
+    if msg.user_id > 0 && msg.username != "cognitive_loop" && msg.username != "system" {
+        return 50;
+    }
+    // 30: Bot-to-bot chat / system messages
+    if msg.user_id == 0 || msg.username == "system" {
+        return 30;
+    }
+    // 10: Cognitive loop (lowest — background thinking)
+    if msg.username == "cognitive_loop" {
+        return 10;
+    }
+    40 // default
+}
+
 /// Global turn counter for snapshot numbering (monotonically increasing across restarts
 /// within a process lifetime — snapshots also carry timestamps for cross-restart ordering).
 static TURN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -221,10 +259,14 @@ impl ChatbotEngine {
                 {
                     // Not processing — start a new turn.
                     tokio::spawn(async move {
-                        // Take pending messages
+                        // Take pending messages and sort by priority (highest first)
                         let messages = {
                             let mut p = pending.lock().await;
-                            std::mem::take(&mut *p)
+                            let mut msgs = std::mem::take(&mut *p);
+                            msgs.sort_by(|a, b| {
+                                message_priority(b, &config).cmp(&message_priority(a, &config))
+                            });
+                            msgs
                         };
 
                         if messages.is_empty() {

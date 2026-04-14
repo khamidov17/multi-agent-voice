@@ -21,6 +21,15 @@ pub(super) async fn execute_delegate_task(
     let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
         .map_err(|e| format!("DB error: {e}"))?;
 
+    // Health check: is the target agent alive?
+    if !db.is_bot_alive(to_agent, 300) {
+        return Err(format!(
+            "Cannot delegate to {} — agent appears offline (no heartbeat in 5 min). \
+             Try a different agent or wait for it to come back.",
+            to_agent
+        ));
+    }
+
     // Create task in shared board
     let task_id = format!("task-{}", chrono::Utc::now().timestamp_millis());
     let pri = match priority {
@@ -190,6 +199,23 @@ pub(super) async fn execute_request_consensus(
         "plan_approve" => vec!["Security".to_string()],
         _ => vec!["Security".to_string()], // default: security review
     };
+
+    // Health check: are all required approvers alive?
+    let dead_agents: Vec<&String> = required
+        .iter()
+        .filter(|a| !db.is_bot_alive(a, 300))
+        .collect();
+    if !dead_agents.is_empty() {
+        return Err(format!(
+            "Cannot request consensus — these agents are offline: {}. \
+             Wait for them to come back or proceed manually.",
+            dead_agents
+                .iter()
+                .map(|a| a.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
 
     let timeout = timeout_minutes.unwrap_or(10);
     let request_id = db

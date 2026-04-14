@@ -312,7 +312,7 @@ fn current_unix_ms() -> u64 {
 /// Parse a SQLite `datetime('now')` string ("YYYY-MM-DD HH:MM:SS") and return
 /// how many seconds ago it was (UTC). Returns `None` if the string is empty or
 /// cannot be parsed.
-fn parse_sqlite_datetime_age_secs(ts: &str) -> Option<u64> {
+pub(crate) fn parse_sqlite_datetime_age_secs(ts: &str) -> Option<u64> {
     if ts.is_empty() {
         return None;
     }
