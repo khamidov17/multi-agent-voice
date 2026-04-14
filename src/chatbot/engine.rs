@@ -125,6 +125,10 @@ pub struct ChatbotEngine {
     quick_is_processing: Arc<AtomicBool>,
     /// Quick-lane debouncer (started lazily in start_debouncer if dual_lane_enabled).
     quick_debouncer: Option<Arc<Debouncer>>,
+
+    // ── Callback pipeline ────────────────────────────────────────
+    /// Before/after callbacks wrapping every tool execution.
+    pub callbacks: Arc<crate::chatbot::callbacks::CallbackPipeline>,
 }
 
 impl ChatbotEngine {
@@ -164,6 +168,7 @@ impl ChatbotEngine {
             quick_pending: Arc::new(Mutex::new(Vec::new())),
             quick_is_processing: Arc::new(AtomicBool::new(false)),
             quick_debouncer: None,
+            callbacks: Arc::new(crate::chatbot::callbacks::CallbackPipeline::default_pipeline()),
         }
     }
 
@@ -184,6 +189,7 @@ impl ChatbotEngine {
         let is_processing = self.is_processing.clone();
         let inject_handle = self.inject_handle.clone();
         let metrics = self.metrics.clone();
+        let callbacks = self.callbacks.clone();
 
         // Notify used by the debouncer callback to request a re-trigger
         // after CC STOP when pending tasks remain. A watcher task (spawned
@@ -203,6 +209,7 @@ impl ChatbotEngine {
                 let is_processing = is_processing.clone();
                 let inject_handle = inject_handle.clone();
                 let metrics = metrics.clone();
+                let callbacks = callbacks.clone();
                 let retrigger = retrigger_inner.clone();
 
                 info!("Debouncer fired");
@@ -237,7 +244,7 @@ impl ChatbotEngine {
                             tokio::time::Duration::from_secs(timeout_secs),
                             process_messages(
                                 &config, &context, &database, &telegram, &claude, &pending,
-                                &messages, &metrics,
+                                &messages, &metrics, &callbacks,
                             ),
                         )
                         .await;
@@ -849,6 +856,7 @@ async fn process_messages(
     pending: &tokio::sync::Mutex<Vec<ChatMessage>>,
     messages: &[ChatMessage],
     metrics: &Arc<crate::chatbot::metrics::MetricsCollector>,
+    callbacks: &crate::chatbot::callbacks::CallbackPipeline,
 ) -> Result<(), String> {
     // Increment messages processed
     metrics
@@ -990,10 +998,29 @@ async fn process_messages(
             ) {
                 _has_sent_response = true;
             }
-            info!("🔧 Executing: {:?}", tc.call);
+            // Run before-callbacks (can modify or block the tool call)
+            let effective_call = match callbacks.run_before(&tc.call, config) {
+                Ok(call) => call,
+                Err(blocked_msg) => {
+                    info!("🚫 Tool call blocked by callback: {}", blocked_msg);
+                    results.push(ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: Some(blocked_msg),
+                        is_error: true,
+                        image: None,
+                    });
+                    continue;
+                }
+            };
+            let effective_tc = crate::chatbot::claude_code::ToolCallWithId {
+                id: tc.id.clone(),
+                call: effective_call,
+            };
+
+            info!("🔧 Executing: {:?}", effective_tc.call);
             let tool_start = std::time::Instant::now();
-            let result = tool_dispatch::execute_tool(
-                tc,
+            let raw_result = tool_dispatch::execute_tool(
+                &effective_tc,
                 config,
                 context,
                 database,
@@ -1002,6 +1029,9 @@ async fn process_messages(
                 default_reply_to,
             )
             .await;
+
+            // Run after-callbacks (can modify the result)
+            let result = callbacks.run_after(&effective_tc.call, raw_result, config);
             let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
             let tool_name = {
                 let raw = format!("{:?}", tc.call);
