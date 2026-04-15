@@ -90,6 +90,13 @@ struct ConfigFile {
     /// When None, the quick lane uses the same model as the deep lane.
     #[serde(default)]
     quick_lane_model: Option<String>,
+    /// Daily token budget for cognitive loop (default 500000).
+    #[serde(default = "default_cognitive_token_budget")]
+    cognitive_token_budget: u64,
+}
+
+fn default_cognitive_token_budget() -> u64 {
+    500_000
 }
 
 fn default_max_strikes() -> u8 {
@@ -162,6 +169,8 @@ pub struct Config {
     pub dual_lane_enabled: bool,
     /// Model override for the quick response lane.
     pub quick_lane_model: Option<String>,
+    /// Daily token budget for cognitive loop.
+    pub cognitive_token_budget: u64,
 }
 
 impl Config {
@@ -242,6 +251,7 @@ impl Config {
             cognitive_enabled: file.cognitive_enabled,
             dual_lane_enabled: file.dual_lane_enabled,
             quick_lane_model: file.quick_lane_model,
+            cognitive_token_budget: file.cognitive_token_budget,
         }
     }
 

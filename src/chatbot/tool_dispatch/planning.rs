@@ -618,6 +618,16 @@ pub(super) async fn execute_complete_workflow_step(
     let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
         .map_err(|e| format!("DB error: {e}"))?;
 
+    // Auto-save output_data to shared_state if the current step has an output_key
+    if let Some(data) = output_data
+        && let Ok(wf) = crate::chatbot::workflow::load_workflow(&db.conn, workflow_id)
+        && wf.current_step < wf.steps.len()
+        && let Some(ref key) = wf.steps[wf.current_step].output_key
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
+    {
+        let _ = db.set_state(key, &value, &config.bot_name, Some(workflow_id));
+    }
+
     // Advance the workflow — the Rust code decides what happens next
     let advance_result = crate::chatbot::workflow::advance_workflow(
         &db.conn,

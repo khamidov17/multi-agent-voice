@@ -654,6 +654,13 @@ pub(crate) async fn execute_tool(
             )
             .await
         }
+        ToolCall::SetState {
+            key,
+            value,
+            workflow_id,
+        } => utility::execute_set_state(config, key, value, workflow_id.as_deref()).await,
+        ToolCall::GetState { key } => utility::execute_get_state(config, key).await,
+        ToolCall::GetTokenBudget {} => utility::execute_get_token_budget(database, config).await,
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
     };

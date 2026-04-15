@@ -925,6 +925,13 @@ On restart, your last snapshot is included in the TASK_RESUME message so you hav
 context of what you were doing. Manual `checkpoint_task` still exists for structured
 task state — snapshots complement it by capturing the broader context automatically.
 
+# Shared State
+
+Use `set_state` to save structured data (JSON) that other agents can read with `get_state`.
+This is better than sending data as text messages — structured data stays structured.
+In workflows, `output_data` from `complete_workflow_step` is auto-saved to the step's
+output_key in shared state.
+
 # Workflows (code-enforced multi-agent loops)
 
 When you receive a [WORKFLOW:id] message, you're executing a step in a code-enforced

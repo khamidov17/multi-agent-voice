@@ -111,6 +111,8 @@ pub struct ChatbotConfig {
     pub dual_lane_enabled: bool,
     /// Model override for the quick response lane.
     pub quick_lane_model: Option<String>,
+    /// Daily token budget for cognitive loop (default 500_000).
+    pub cognitive_daily_token_budget: u64,
 }
 
 impl Default for ChatbotConfig {
@@ -135,6 +137,7 @@ impl Default for ChatbotConfig {
             cognitive_enabled: true,
             dual_lane_enabled: true,
             quick_lane_model: None,
+            cognitive_daily_token_budget: 500_000,
         }
     }
 }
@@ -317,6 +320,26 @@ impl ChatbotEngine {
                                         .await;
                                 }
                             }
+                        }
+
+                        // Log token budget (rough estimate: chars/4 ≈ tokens)
+                        {
+                            let msg_chars: usize = messages.iter().map(|m| m.text.len()).sum();
+                            let estimated_tokens = (msg_chars / 4 + 500) as i64; // +500 for system prompt overhead
+                            let source = if messages.iter().any(|m| m.username == "cognitive_loop")
+                            {
+                                "cognitive"
+                            } else if messages.iter().any(|m| m.text.starts_with("[WORKFLOW:")) {
+                                "workflow"
+                            } else {
+                                "user_message"
+                            };
+                            let db = database.lock().await;
+                            let conn = db.connection().lock().unwrap();
+                            let _ = conn.execute(
+                                "INSERT INTO token_budget (source, estimated_tokens) VALUES (?1, ?2)",
+                                rusqlite::params![source, estimated_tokens],
+                            );
                         }
 
                         // Save state
@@ -534,6 +557,7 @@ impl ChatbotEngine {
                 self.config.data_dir.clone(),
                 self.database.clone(),
                 self.metrics.clone(),
+                self.config.cognitive_daily_token_budget,
             );
             info!(
                 "Cognitive loop started for {} (interval={}s)",

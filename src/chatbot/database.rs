@@ -346,6 +346,15 @@ impl Database {
                 PRIMARY KEY (chat_id, date)
             );
 
+            -- Token budget tracking for cognitive loop throttling
+            CREATE TABLE IF NOT EXISTS token_budget (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                source           TEXT NOT NULL,
+                estimated_tokens INTEGER NOT NULL,
+                timestamp        TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_budget_timestamp ON token_budget(timestamp);
+
             -- Automatic turn snapshots (LangGraph-inspired)
             CREATE TABLE IF NOT EXISTS turn_snapshots (
                 id          TEXT PRIMARY KEY,

@@ -94,6 +94,7 @@ pub fn start_cognitive_loop(
     data_dir: Option<PathBuf>,
     database: Arc<Mutex<Database>>,
     metrics: Arc<MetricsCollector>,
+    cognitive_daily_token_budget: u64,
 ) {
     tokio::spawn(async move {
         // Wait 60 seconds after startup before first cognitive tick
@@ -130,6 +131,29 @@ pub fn start_cognitive_loop(
                     bot_name
                 );
                 continue;
+            }
+
+            // Token budget check: skip tick if cognitive spending exceeds daily limit
+            if cognitive_daily_token_budget > 0
+                && let Ok(db) = database.try_lock()
+                && let Ok(conn) = db.connection().try_lock()
+            {
+                let spent: i64 = conn
+                    .query_row(
+                        "SELECT COALESCE(SUM(estimated_tokens), 0) FROM token_budget \
+                         WHERE source = 'cognitive' AND timestamp > datetime('now', '-24 hours')",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                if spent as u64 > cognitive_daily_token_budget {
+                    info!(
+                        "[cognitive] {} — budget exceeded ({} tokens today, limit {}). Skipping tick.",
+                        bot_name, spent, cognitive_daily_token_budget
+                    );
+                    state.last_mode_index = (state.last_mode_index % MODES.len()) + 1;
+                    continue;
+                }
             }
 
             // Rotate through modes

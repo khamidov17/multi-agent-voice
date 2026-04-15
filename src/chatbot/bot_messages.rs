@@ -256,6 +256,15 @@ impl BotMessageDb {
                 updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            -- Shared typed state dictionary (Google ADK output_key pattern)
+            CREATE TABLE IF NOT EXISTS shared_state (
+                key         TEXT PRIMARY KEY,
+                value_json  TEXT NOT NULL,
+                set_by      TEXT NOT NULL,
+                workflow_id TEXT,
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS progress_ledger (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 task_id       TEXT    NOT NULL,
@@ -831,6 +840,69 @@ impl BotMessageDb {
             }
         }
         Ok(result)
+    }
+
+    // ── Shared state (ADK output_key pattern) ──────────────────────────
+
+    /// Set a shared state value (upsert).
+    pub fn set_state(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+        set_by: &str,
+        workflow_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let json = serde_json::to_string(value)?;
+        self.conn.execute(
+            "INSERT INTO shared_state (key, value_json, set_by, workflow_id, updated_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET
+                 value_json = ?2, set_by = ?3, workflow_id = ?4, updated_at = datetime('now')",
+            params![key, json, set_by, workflow_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get a shared state value.
+    pub fn get_state(&self, key: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        let result: rusqlite::Result<String> = self.conn.query_row(
+            "SELECT value_json FROM shared_state WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        );
+        match result {
+            Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Get all state for a workflow.
+    pub fn get_workflow_state(
+        &self,
+        workflow_id: &str,
+    ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value_json FROM shared_state WHERE workflow_id = ?1")?;
+        let mut map = serde_json::Map::new();
+        let rows = stmt.query_map(params![workflow_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows.flatten() {
+            let (key, json) = row;
+            if let Ok(val) = serde_json::from_str(&json) {
+                map.insert(key, val);
+            }
+        }
+        Ok(map)
+    }
+
+    /// Delete a state key.
+    pub fn delete_state(&self, key: &str) -> anyhow::Result<()> {
+        self.conn
+            .execute("DELETE FROM shared_state WHERE key = ?1", params![key])?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------

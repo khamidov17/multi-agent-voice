@@ -615,6 +615,21 @@ pub enum ToolCall {
         output_data: Option<String>,
     },
 
+    /// Set a shared state value (structured data passing between agents).
+    SetState {
+        key: String,
+        /// JSON value to store.
+        value: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        workflow_id: Option<String>,
+    },
+
+    /// Get a shared state value.
+    GetState { key: String },
+
+    /// Get token budget status (spending by source, remaining budget).
+    GetTokenBudget {},
+
     /// Signal that processing is complete.
     Done,
 
@@ -1537,6 +1552,42 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "set_state".to_string(),
+            description: "Set a shared state value. Use for structured data passing between agents — \
+                better than sending data as text messages. Other agents can read it with get_state."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "State key name" },
+                    "value": { "type": "string", "description": "JSON value to store" },
+                    "workflow_id": { "type": "string", "description": "Optional: scope to a workflow" }
+                },
+                "required": ["key", "value"]
+            }),
+        },
+        Tool {
+            name: "get_state".to_string(),
+            description: "Get a shared state value set by any agent. Returns the JSON value or 'not found'."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "State key to read" }
+                },
+                "required": ["key"]
+            }),
+        },
+        Tool {
+            name: "get_token_budget".to_string(),
+            description: "Get token budget status: spending by source (cognitive, user, workflow), \
+                daily budget, and remaining tokens.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        Tool {
             name: "done".to_string(),
             description: "Legacy stop signal. PREFER using action='stop' with a reason field in the structured output instead. If you use this tool, it acts as action='stop'. In DMs, always send a message first. In groups, you MUST respond to teammate messages before stopping.".to_string(),
             parameters: serde_json::json!({
@@ -1593,7 +1644,7 @@ mod tests {
         // Exact count — update this when adding/removing tools
         assert_eq!(
             tools.len(),
-            67,
+            70,
             "Tool count changed — update this test. Tools: {:?}",
             tools.iter().map(|t| &t.name).collect::<Vec<_>>()
         );

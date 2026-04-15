@@ -955,6 +955,115 @@ pub(super) async fn execute_check_experiments(query: &str) -> Result<Option<Stri
     }
 }
 
+// ─── Shared state tools ─────────────────────────────────────────────────
+
+/// Set a shared state value (SetState tool).
+pub(super) async fn execute_set_state(
+    config: &ChatbotConfig,
+    key: &str,
+    value_json: &str,
+    workflow_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    // Validate JSON
+    let value: serde_json::Value =
+        serde_json::from_str(value_json).map_err(|e| format!("Invalid JSON value: {e}"))?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    db.set_state(key, &value, &config.bot_name, workflow_id)
+        .map_err(|e| format!("Failed to set state: {e}"))?;
+
+    Ok(Some(format!("State '{}' set successfully.", key)))
+}
+
+/// Get a shared state value (GetState tool).
+pub(super) async fn execute_get_state(
+    config: &ChatbotConfig,
+    key: &str,
+) -> Result<Option<String>, String> {
+    let db_path = config
+        .shared_bot_messages_db
+        .as_ref()
+        .ok_or("No shared DB configured")?;
+
+    let db = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+        .map_err(|e| format!("DB error: {e}"))?;
+
+    match db.get_state(key).map_err(|e| format!("DB error: {e}"))? {
+        Some(value) => Ok(Some(
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+        )),
+        None => Ok(Some(format!("State key '{}' not found.", key))),
+    }
+}
+
+// ─── Token budget tool ──────────────────────────────────────────────────
+
+/// Get token budget status (GetTokenBudget tool).
+pub(super) async fn execute_get_token_budget(
+    database: &Mutex<Database>,
+    config: &ChatbotConfig,
+) -> Result<Option<String>, String> {
+    let db = database.lock().await;
+    let conn = db.connection();
+    let conn = conn.lock().unwrap();
+
+    // Check if table exists
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='token_budget'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+
+    if !table_exists {
+        return Ok(Some(
+            "Token budget tracking not yet initialized (no data).".to_string(),
+        ));
+    }
+
+    // Query spending by source in last 24h
+    let mut stmt = conn
+        .prepare(
+            "SELECT source, SUM(estimated_tokens) as total
+             FROM token_budget WHERE timestamp > datetime('now', '-24 hours')
+             GROUP BY source ORDER BY total DESC",
+        )
+        .map_err(|e| format!("Query error: {e}"))?;
+
+    let rows: Vec<(String, i64)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| format!("Query error: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let total: i64 = rows.iter().map(|(_, t)| t).sum();
+    let budget = config.cognitive_daily_token_budget;
+    let remaining = budget.saturating_sub(total as u64);
+
+    let mut lines = vec![format!(
+        "Token budget (last 24h): {total} / {budget} ({remaining} remaining)"
+    )];
+    for (source, tokens) in &rows {
+        let pct = if total > 0 {
+            (*tokens as f64 / total as f64 * 100.0) as u64
+        } else {
+            0
+        };
+        lines.push(format!("  {}: {} tokens ({}%)", source, tokens, pct));
+    }
+
+    Ok(Some(lines.join("\n")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

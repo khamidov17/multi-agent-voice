@@ -142,6 +142,7 @@ impl BotState {
                 cognitive_enabled: config.cognitive_enabled,
                 dual_lane_enabled: config.dual_lane_enabled,
                 quick_lane_model: config.quick_lane_model.clone(),
+                cognitive_daily_token_budget: config.cognitive_token_budget,
             };
 
             // Fetch available TTS voices if endpoint configured
