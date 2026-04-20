@@ -37,6 +37,13 @@ pub enum Op {
     Write,
     /// Health probe — guardian returns `ok=true` without touching the filesystem.
     Ping,
+    /// Owner-only break-glass write that bypasses the protected-path denial.
+    /// Signed with a SEPARATE override key (`<run_dir>/override.key`, not
+    /// `guardian.key`) so the harness cannot forge one even if compromised.
+    /// Still enforces `allowed_uids`, nonce replay, canonicalize + O_NOFOLLOW,
+    /// and the allowed-root outside check. Audit-logged with decision
+    /// `override_allow`.
+    OverrideWrite,
 }
 
 /// One response from guardian to client.
@@ -84,6 +91,9 @@ pub enum ErrCode {
     Malformed,
     /// Guardian is in an admin-initiated pause (via `guardianctl pause`).
     Paused,
+    /// Override-once was requested but the guardian has no `override_key_path`
+    /// configured — the break-glass path is disabled on this deployment.
+    OverrideDisabled,
 }
 
 impl Resp {
@@ -166,6 +176,13 @@ impl Resp {
             ErrCode::Paused => Some(
                 "Guardian is admin-paused via `guardianctl pause`. Run \
                  `guardianctl resume` to re-enable writes."
+                    .into(),
+            ),
+            ErrCode::OverrideDisabled => Some(
+                "This guardian has no `override_key_path` configured, so \
+                 `override-once` is disabled. Configure one in guardian.json \
+                 and install an `override.key` (0400, >=32 random bytes) \
+                 before attempting again."
                     .into(),
             ),
             ErrCode::Denied => None,

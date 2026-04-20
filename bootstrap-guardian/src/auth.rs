@@ -47,6 +47,7 @@ pub fn compute_hmac(key: &[u8], op: Op, path: &str, bytes: &[u8], nonce: u64) ->
     let op_tag = match op {
         Op::Write => b"write".as_slice(),
         Op::Ping => b"ping".as_slice(),
+        Op::OverrideWrite => b"override_write".as_slice(),
     };
     mac.update(op_tag);
     mac.update(b"|");

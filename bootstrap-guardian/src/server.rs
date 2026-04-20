@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::audit::{AuditEvent, AuditLog};
-use crate::auth::{compute_hmac, constant_time_eq, peer_uid};
+use crate::auth::{compute_hmac, constant_time_eq, load_key, peer_uid};
 use crate::config::GuardianConfig;
 use crate::nonce::NonceStore;
 use crate::paths::{PathGuard, Verdict};
@@ -216,8 +216,50 @@ impl Guardian {
             }
         };
 
+        // Pick the signing key. `OverrideWrite` is signed with a SEPARATE
+        // break-glass key (`override.key`) not known to the harness, so a
+        // compromised harness cannot mint an override request. Every other op
+        // verifies against the shared guardian key.
+        let key_for_verify: std::borrow::Cow<'_, [u8]> = match req.op {
+            Op::OverrideWrite => {
+                let Some(ref override_path) = self.cfg.override_key_path else {
+                    self.audit.write(&AuditEvent {
+                        ts: AuditLog::now(),
+                        uid,
+                        op: op_tag(req.op),
+                        path: req.path.clone(),
+                        decision: "override_disabled",
+                        bytes: Some(bytes.len() as u64),
+                        reason: req.reason.as_deref(),
+                        err: Some("override_disabled"),
+                    });
+                    return Resp::err(ErrCode::OverrideDisabled, "override disabled");
+                };
+                match load_key(override_path) {
+                    Ok(k) => std::borrow::Cow::Owned(k),
+                    Err(e) => {
+                        self.audit.write(&AuditEvent {
+                            ts: AuditLog::now(),
+                            uid,
+                            op: op_tag(req.op),
+                            path: req.path.clone(),
+                            decision: "override_disabled",
+                            bytes: Some(bytes.len() as u64),
+                            reason: req.reason.as_deref(),
+                            err: Some("override_key_load"),
+                        });
+                        return Resp::err(
+                            ErrCode::OverrideDisabled,
+                            format!("override disabled: {}", e),
+                        );
+                    }
+                }
+            }
+            Op::Write | Op::Ping => std::borrow::Cow::Borrowed(self.key.as_slice()),
+        };
+
         // HMAC check — constant-time, over canonical triple.
-        let expected = compute_hmac(&self.key, req.op, &req.path, &bytes, req.nonce);
+        let expected = compute_hmac(&key_for_verify, req.op, &req.path, &bytes, req.nonce);
         if !constant_time_eq(&expected, &req.hmac) {
             self.audit.write(&AuditEvent {
                 ts: AuditLog::now(),
@@ -269,6 +311,7 @@ impl Guardian {
                 Resp::ok_pong()
             }
             Op::Write => self.do_write(uid, &req, &bytes),
+            Op::OverrideWrite => self.do_override_write(uid, &req, &bytes),
         }
     }
 
@@ -402,12 +445,138 @@ impl Guardian {
             }
         }
     }
+
+    /// Owner-only break-glass write. Same flow as `do_write` but bypasses
+    /// `Verdict::DenyProtected`. Still enforces `DenyOutsideAllowed` and
+    /// `DenyTraversal`; still uses `O_NOFOLLOW` so a symlink swap between
+    /// canonicalize and open won't let the write escape into an unrelated
+    /// file. Audit decision is `override_allow` so the log makes the intent
+    /// obvious to a post-mortem reviewer.
+    fn do_override_write(&self, uid: u32, req: &Req, bytes: &[u8]) -> Resp {
+        let target = Path::new(&req.path);
+        let (verdict, canonical) = match self.paths.decide(target) {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.audit.write(&AuditEvent {
+                    ts: AuditLog::now(),
+                    uid,
+                    op: "override_write",
+                    path: req.path.clone(),
+                    decision: "traversal",
+                    bytes: Some(bytes.len() as u64),
+                    reason: req.reason.as_deref(),
+                    err: Some("traversal"),
+                });
+                return Resp::err(ErrCode::PathTraversal, e.to_string());
+            }
+        };
+
+        let alt_roots: Vec<String> = self
+            .cfg
+            .allowed_roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+
+        match verdict {
+            // Override is the ONE path that bypasses DenyProtected.
+            Verdict::Allow | Verdict::DenyProtected => {}
+            Verdict::DenyOutsideAllowed => {
+                self.audit.write(&AuditEvent {
+                    ts: AuditLog::now(),
+                    uid,
+                    op: "override_write",
+                    path: canonical.display().to_string(),
+                    decision: "denied_outside",
+                    bytes: Some(bytes.len() as u64),
+                    reason: req.reason.as_deref(),
+                    err: Some("denied"),
+                });
+                return Resp::denied(
+                    format!(
+                        "path {} is outside every allowed root (override cannot \
+                         escape the allowlist)",
+                        canonical.display()
+                    ),
+                    alt_roots,
+                );
+            }
+            Verdict::DenyTraversal => {
+                self.audit.write(&AuditEvent {
+                    ts: AuditLog::now(),
+                    uid,
+                    op: "override_write",
+                    path: canonical.display().to_string(),
+                    decision: "denied_traversal",
+                    bytes: Some(bytes.len() as u64),
+                    reason: req.reason.as_deref(),
+                    err: Some("traversal"),
+                });
+                return Resp::err(
+                    ErrCode::PathTraversal,
+                    format!("path contains traversal: {}", canonical.display()),
+                );
+            }
+        }
+
+        if let Some(parent) = canonical.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            self.audit.write(&AuditEvent {
+                ts: AuditLog::now(),
+                uid,
+                op: "override_write",
+                path: canonical.display().to_string(),
+                decision: "io_error",
+                bytes: Some(bytes.len() as u64),
+                reason: req.reason.as_deref(),
+                err: Some("mkdir"),
+            });
+            return Resp::err(
+                ErrCode::IoError,
+                format!("mkdir {}: {}", parent.display(), e),
+            );
+        }
+
+        match write_with_nofollow(&canonical, bytes) {
+            Ok(n) => {
+                self.audit.write(&AuditEvent {
+                    ts: AuditLog::now(),
+                    uid,
+                    op: "override_write",
+                    path: canonical.display().to_string(),
+                    decision: "override_allow",
+                    bytes: Some(n),
+                    reason: req.reason.as_deref(),
+                    err: None,
+                });
+                Resp::ok_written(n)
+            }
+            Err(e) => {
+                self.audit.write(&AuditEvent {
+                    ts: AuditLog::now(),
+                    uid,
+                    op: "override_write",
+                    path: canonical.display().to_string(),
+                    decision: "io_error",
+                    bytes: Some(bytes.len() as u64),
+                    reason: req.reason.as_deref(),
+                    err: Some("write"),
+                });
+                Resp::err(
+                    ErrCode::IoError,
+                    format!("write {}: {}", canonical.display(), e),
+                )
+            }
+        }
+    }
 }
 
 fn op_tag(op: Op) -> &'static str {
     match op {
         Op::Write => "write",
         Op::Ping => "ping",
+        Op::OverrideWrite => "override_write",
     }
 }
 

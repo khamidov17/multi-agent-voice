@@ -22,6 +22,13 @@ pub struct GuardianConfig {
     pub allowed_uids: Vec<u32>,
     /// Seconds a single request may block before guardian returns IpcTimeout.
     pub request_timeout_secs: u64,
+    /// Path to the owner-only override key (`override.key`, 0400, >=32 bytes).
+    /// When `None`, `override-once` is disabled and any `OverrideWrite`
+    /// request is rejected with `ErrCode::OverrideDisabled`. When set, the
+    /// key is loaded on demand (not at boot) so the guardian can start with
+    /// an absent override key and still serve normal writes.
+    #[serde(default)]
+    pub override_key_path: Option<PathBuf>,
 }
 
 impl GuardianConfig {
@@ -46,6 +53,7 @@ impl GuardianConfig {
             allowed_roots: vec![allowed_root],
             allowed_uids: vec![unsafe { libc::geteuid() }],
             request_timeout_secs: 5,
+            override_key_path: None,
         }
     }
 
@@ -67,5 +75,13 @@ impl GuardianConfig {
 
     pub fn audit_log_path(&self) -> PathBuf {
         self.run_dir.join("guardian.audit.jsonl")
+    }
+
+    /// Default path for the override key when `override_key_path` is unset
+    /// but the caller still wants a well-known location (e.g. `guardianctl`
+    /// picking the default when not explicitly configured). Guardian itself
+    /// only honors override writes when `override_key_path` is Some().
+    pub fn default_override_key_path(&self) -> PathBuf {
+        self.run_dir.join("override.key")
     }
 }
