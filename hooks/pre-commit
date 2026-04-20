@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# pre-commit — blocks staging of credential-shaped files.
+#
+# Defense against accidentally committing archive/jumavoy/.claude/.credentials.json,
+# guardian.key, nova.json/atlas.json/sentinel.json, .env, or anything matching
+# typical secret patterns. These are already in .gitignore, but a `git add -A`
+# inside a nested directory can still catch them.
+
+set -euo pipefail
+
+# Files about to be committed (added or modified, not deleted).
+staged=$(git diff --cached --name-only --diff-filter=ACMR || true)
+
+deny=()
+pattern_check() {
+  local file="$1" reason="$2"
+  deny+=("  $file  ($reason)")
+}
+
+while IFS= read -r file; do
+  [ -z "$file" ] && continue
+  case "$file" in
+    *.credentials*|*/credentials.*|credentials.*)
+      pattern_check "$file" "matches credentials pattern"
+      ;;
+    *.key|*/guardian.key|*guardian.key*)
+      # Allow key TEMPLATES (e.g., guardian.example.key). Block plain .key files.
+      case "$file" in
+        *example*|*template*|*.tmpl)
+          ;;
+        *)
+          pattern_check "$file" "matches *.key pattern"
+          ;;
+      esac
+      ;;
+    nova.json|atlas.json|sentinel.json|**/nova.json|**/atlas.json|**/sentinel.json)
+      # Allow .example.json
+      case "$file" in
+        *example*)
+          ;;
+        *)
+          pattern_check "$file" "bot config file with tokens"
+          ;;
+      esac
+      ;;
+    .env|**/.env|.env.*)
+      case "$file" in
+        *example*|*sample*|*template*)
+          ;;
+        *)
+          pattern_check "$file" ".env file"
+          ;;
+      esac
+      ;;
+    *.pem|*.p12|*.pfx|id_rsa|**/id_rsa|id_ed25519|**/id_ed25519)
+      pattern_check "$file" "matches private-key pattern"
+      ;;
+  esac
+done <<< "$staged"
+
+if [ "${#deny[@]}" -gt 0 ]; then
+  echo "pre-commit: refused to commit credential-shaped files:" >&2
+  printf '%s\n' "${deny[@]}" >&2
+  echo "" >&2
+  echo "If one of these is intentional (e.g. an .example.* template), rename it to" >&2
+  echo "include 'example' or 'template' in the name. Otherwise, unstage with:" >&2
+  echo "  git reset HEAD <file>" >&2
+  exit 1
+fi
+
+# Also run a quick content scan for common token shapes in new/modified files,
+# but ONLY for files under 64KB (big files are likely binaries/tarballs).
+leaked=()
+while IFS= read -r file; do
+  [ -z "$file" ] && continue
+  [ ! -f "$file" ] && continue
+  # Skip vendored/third-party (large) dirs
+  case "$file" in
+    archive/*|rag/index/*|target/*|*/target/*|*.tar.gz|*.zip|*.pdf|*.png|*.jpg|*.webp) continue;;
+  esac
+  size=$(wc -c < "$file")
+  if [ "$size" -gt 65536 ]; then
+    continue
+  fi
+  # Telegram bot tokens: digits:35-char-alnum
+  if grep -qE 'bot[0-9]{8,12}:[A-Za-z0-9_-]{30,}' "$file" 2>/dev/null; then
+    leaked+=("  $file  (possible Telegram bot token)")
+  fi
+  # Anthropic API keys
+  if grep -qE 'sk-ant-[A-Za-z0-9_-]{40,}' "$file" 2>/dev/null; then
+    leaked+=("  $file  (possible Anthropic API key)")
+  fi
+  # OpenAI API keys
+  if grep -qE 'sk-[A-Za-z0-9]{40,}' "$file" 2>/dev/null; then
+    # Skip if file name looks like an example
+    case "$file" in
+      *example*|*sample*|*template*|*test*) ;;
+      *) leaked+=("  $file  (possible OpenAI API key)") ;;
+    esac
+  fi
+done <<< "$staged"
+
+if [ "${#leaked[@]}" -gt 0 ]; then
+  echo "pre-commit: token-shaped content found in staged files:" >&2
+  printf '%s\n' "${leaked[@]}" >&2
+  echo "" >&2
+  echo "Investigate before committing. If false positive, commit with --no-verify (NOT recommended)." >&2
+  exit 1
+fi
+
+exit 0

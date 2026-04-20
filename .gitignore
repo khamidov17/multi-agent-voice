@@ -13,6 +13,15 @@ data/
 # Supervisor build artifacts
 supervisor/target/
 
+# Bootstrap guardian (Phase 0) build artifacts
+bootstrap-guardian/target/
+
+# Bootstrap guardian runtime state (key, nonces, sockets, logs)
+# Paths match ~/claudir-dev/run and /opt/claudir/run defaults in deploy/guardian.example.json
+claudir-dev/run/
+# Any guardian.json that isn't the example template
+guardian.json
+
 # Bot config files (contain tokens — never commit)
 atlas.json
 nova.json
