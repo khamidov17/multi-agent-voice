@@ -318,8 +318,14 @@ pub(crate) async fn execute_tool(
             description,
             severity,
         } => {
-            utility::execute_report_bug(config.data_dir.as_ref(), description, severity.as_deref())
-                .await
+            utility::execute_report_bug(
+                config.data_dir.as_ref(),
+                description,
+                severity.as_deref(),
+                &config.bot_name,
+                config.shared_bot_messages_db.as_ref(),
+            )
+            .await
         }
         ToolCall::CreateSpreadsheet {
             chat_id,

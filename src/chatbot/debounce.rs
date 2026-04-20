@@ -6,10 +6,17 @@ use tokio::sync::{Notify, mpsc};
 use tokio::time::sleep;
 use tracing::warn;
 
+/// Maximum messages that can accumulate before the debouncer force-triggers,
+/// even if messages are still arriving. Prevents unbounded RAM growth under
+/// high-velocity spam or message floods.
+const MAX_BATCH_SIZE: usize = 100;
+
 /// Debounce timer that triggers a callback after a period of inactivity.
 ///
 /// Each call to `trigger()` resets the timer. When the timer expires
 /// (no triggers for the specified duration), the callback is executed.
+/// If `MAX_BATCH_SIZE` triggers arrive within one cycle, the callback
+/// fires immediately regardless of the timer.
 pub struct Debouncer {
     /// Channel to signal reset
     reset_tx: mpsc::Sender<()>,
@@ -45,8 +52,17 @@ impl Debouncer {
                             break;
                         }
 
-                        // Debounce loop: keep resetting while triggers come in
+                        // Debounce loop: keep resetting while triggers come in.
+                        // Force-trigger after MAX_BATCH_SIZE to prevent unbounded accumulation.
+                        let mut trigger_count: usize = 1;
                         loop {
+                            if trigger_count >= MAX_BATCH_SIZE {
+                                warn!(
+                                    "Debouncer force-triggered: {trigger_count} messages accumulated"
+                                );
+                                callback();
+                                break;
+                            }
                             tokio::select! {
                                 biased;
 
@@ -56,6 +72,7 @@ impl Debouncer {
                                         return;
                                     }
                                     // Reset received, restart the timer
+                                    trigger_count += 1;
                                 }
                                 _ = sleep(duration) => {
                                     // Timer expired, call callback

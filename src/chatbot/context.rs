@@ -4,33 +4,48 @@
 //! - Looking up messages by ID (for replies)
 //! - Persistence across restarts
 //!
+//! Bounded to MAX_MESSAGES entries. Oldest messages are evicted when the limit
+//! is reached, preventing unbounded memory growth on long-running bots.
+//!
 //! Note: We no longer use this for building prompts - Claude Code maintains its own history.
 
 use crate::chatbot::message::ChatMessage;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use tracing::{info, warn};
 
+/// Maximum messages to keep in the context buffer.
+/// 500 messages ~= 250 KB — plenty for reply lookups without unbounded growth.
+const MAX_MESSAGES: usize = 500;
+
 /// Buffer for recent messages.
 pub struct ContextBuffer {
-    messages: Vec<ChatMessage>,
+    messages: VecDeque<ChatMessage>,
     index: HashMap<i64, usize>,
 }
 
 impl ContextBuffer {
     pub fn new() -> Self {
         Self {
-            messages: Vec::new(),
+            messages: VecDeque::with_capacity(MAX_MESSAGES),
             index: HashMap::new(),
         }
     }
 
-    /// Add a message.
+    /// Add a message. Evicts the oldest if at capacity.
     pub fn add_message(&mut self, msg: ChatMessage) {
+        // Evict oldest messages until under limit
+        while self.messages.len() >= MAX_MESSAGES {
+            if let Some(old) = self.messages.pop_front() {
+                self.index.remove(&old.message_id);
+            }
+            // Rebuild index since VecDeque indices shifted
+            self.rebuild_index();
+        }
         let idx = self.messages.len();
         self.index.insert(msg.message_id, idx);
-        self.messages.push(msg);
+        self.messages.push_back(msg);
     }
 
     /// Edit a message by ID.
@@ -69,17 +84,21 @@ struct ContextState {
 }
 
 impl ContextBuffer {
+    /// Save to disk using atomic write (temp + rename) to prevent corruption.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let state = ContextState {
-            messages: self.messages.clone(),
+            messages: self.messages.iter().cloned().collect(),
         };
 
         let json = serde_json::to_string_pretty(&state)
             .map_err(|e| format!("Failed to serialize: {e}"))?;
 
-        std::fs::write(path, json).map_err(|e| format!("Failed to write: {e}"))?;
+        // Atomic write: write to .tmp, then rename — prevents half-written files on crash.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json).map_err(|e| format!("Failed to write tmp: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("Failed to rename: {e}"))?;
 
-        info!("💾 Saved context ({} messages)", self.messages.len());
+        info!("Saved context ({} messages)", self.messages.len());
         Ok(())
     }
 
@@ -89,8 +108,18 @@ impl ContextBuffer {
         let state: ContextState =
             serde_json::from_str(&json).map_err(|e| format!("Failed to parse: {e}"))?;
 
+        // Only keep the last MAX_MESSAGES when loading (truncate old history).
+        let messages: VecDeque<ChatMessage> = if state.messages.len() > MAX_MESSAGES {
+            state.messages[state.messages.len() - MAX_MESSAGES..]
+                .iter()
+                .cloned()
+                .collect()
+        } else {
+            state.messages.into_iter().collect()
+        };
+
         let mut buffer = Self {
-            messages: state.messages,
+            messages,
             index: HashMap::new(),
         };
         buffer.rebuild_index();
@@ -156,5 +185,20 @@ mod tests {
 
         let msg = ctx.get_message(1).unwrap();
         assert_eq!(msg.text, "world");
+    }
+
+    #[test]
+    fn test_eviction_at_capacity() {
+        let mut ctx = ContextBuffer::new();
+        // Fill to MAX_MESSAGES + 10
+        for i in 0..=(MAX_MESSAGES as i64 + 10) {
+            ctx.add_message(make_msg(i, &format!("msg{i}")));
+        }
+        // Buffer should not exceed MAX_MESSAGES
+        assert!(ctx.messages.len() <= MAX_MESSAGES);
+        // Oldest messages should be evicted
+        assert!(ctx.get_message(0).is_none());
+        // Recent messages should still be there
+        assert!(ctx.get_message(MAX_MESSAGES as i64 + 10).is_some());
     }
 }

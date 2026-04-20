@@ -79,6 +79,7 @@ mod tests {
             dual_lane_enabled: false,
             quick_lane_model: None,
             cognitive_token_budget: 500_000,
+            model: "sonnet".to_string(),
         }
     }
 

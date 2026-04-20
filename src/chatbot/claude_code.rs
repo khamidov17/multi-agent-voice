@@ -192,6 +192,7 @@ struct WorkerConfig {
     session_file: Option<PathBuf>,
     full_permissions: bool,
     tools_override: Option<String>,
+    model: String,
 }
 
 impl ClaudeCode {
@@ -204,6 +205,7 @@ impl ClaudeCode {
         session_file: Option<PathBuf>,
         full_permissions: bool,
         tools_override: Option<String>,
+        model: Option<String>,
     ) -> Result<Self, String> {
         let (msg_tx, msg_rx) = mpsc::channel::<WorkerMessage>(32);
         let (resp_tx, resp_rx) = mpsc::channel::<Response>(32);
@@ -233,6 +235,7 @@ impl ClaudeCode {
             session_file,
             full_permissions,
             tools_override,
+            model: model.unwrap_or_else(|| "sonnet".to_string()),
         };
 
         std::thread::spawn(move || {
@@ -755,6 +758,7 @@ fn setup_claude_process(
     session_id: &mut Option<String>,
     full_permissions: bool,
     tools_override: &Option<String>,
+    model: &str,
     atomics: &WorkerAtomics,
 ) -> Result<
     (
@@ -770,6 +774,7 @@ fn setup_claude_process(
         resume_session,
         full_permissions,
         tools_override,
+        model,
     )?;
     let mut stdin = process.stdin.take().ok_or("No stdin")?;
     let stdout = process.stdout.take().ok_or("No stdout")?;
@@ -882,13 +887,15 @@ fn setup_claude_process(
         }
     });
 
-    // Send first message to trigger Claude Code output
+    // Send first message to trigger Claude Code output.
+    // Note: system prompt is already passed via --system-prompt flag.
+    // We just send a short trigger to start the session.
     let first_message = if resume_session.is_some() {
-        "Session resumed. Ready for new messages.".to_string()
+        "Session resumed. Ready for new messages."
     } else {
-        system_prompt.to_string()
+        "System initialized. Waiting for messages."
     };
-    send_message(&mut stdin, &first_message)?;
+    send_message(&mut stdin, first_message)?;
 
     // Wait for system message (comes first in output)
     loop {
@@ -915,6 +922,9 @@ fn setup_claude_process(
                     .tools
                     .iter()
                     .filter(|t| !allowed_set.contains(&t.as_str()))
+                    // Allow MCP-provided tools (mcp__*) — these come from
+                    // Claude CLI's auto-discovered integrations (Gmail, etc.)
+                    .filter(|t| !t.starts_with("mcp__"))
                     .collect();
                 if !unexpected.is_empty() {
                     error!("SECURITY: Unexpected tools: {:?}", unexpected);
@@ -962,6 +972,7 @@ fn worker_loop(
         &mut session_id,
         cfg.full_permissions,
         &cfg.tools_override,
+        &cfg.model,
         &atomics,
     )?;
 
@@ -1016,6 +1027,7 @@ fn worker_loop(
                 &mut session_id,
                 cfg.full_permissions,
                 &cfg.tools_override,
+                &cfg.model,
                 &atomics,
             ) {
                 Ok((new_proc, new_stdin, new_out_rx, new_stderr_buf)) => {
@@ -1129,6 +1141,7 @@ fn worker_loop(
                 &mut session_id,
                 cfg.full_permissions,
                 &cfg.tools_override,
+                &cfg.model,
                 &atomics,
             ) {
                 Ok((new_proc, new_stdin, new_out_rx, new_stderr_buf)) => {
@@ -1181,6 +1194,7 @@ fn spawn_process(
     resume_session: Option<&str>,
     full_permissions: bool,
     tools_override: &Option<String>,
+    model: &str,
 ) -> Result<Child, String> {
     let schema: serde_json::Value =
         serde_json::from_str(TOOL_CALLS_SCHEMA).map_err(|e| format!("Bad schema: {}", e))?;
@@ -1214,7 +1228,7 @@ fn spawn_process(
         "stream-json",
         "--verbose",
         "--model",
-        "sonnet",
+        model,
         "--system-prompt",
         system_prompt,
         "--tools",
@@ -1222,6 +1236,10 @@ fn spawn_process(
         "--json-schema",
         &schema_str,
     ]);
+
+    // Force IPv4 for DNS resolution — some servers have broken IPv6 which causes
+    // api_retry storms when the Claude CLI tries to connect to Anthropic's API.
+    cmd.env("NODE_OPTIONS", "--dns-result-order=ipv4first");
 
     // Tier 1: skip permission prompts so Nova can work outside the project directory
     if full_permissions {
@@ -1234,11 +1252,11 @@ fn spawn_process(
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
-            use libc::{RLIMIT_AS, RLIMIT_NOFILE, RLIMIT_NPROC, rlimit, setrlimit};
+            use libc::{RLIMIT_AS, RLIMIT_CPU, RLIMIT_NOFILE, RLIMIT_NPROC, rlimit, setrlimit};
             let mem = rlimit {
-                rlim_cur: 4_294_967_296,
-                rlim_max: 4_294_967_296,
-            }; // 4GB
+                rlim_cur: 17_179_869_184,
+                rlim_max: 17_179_869_184,
+            }; // 16GB — Node.js needs large virtual address space
             let files = rlimit {
                 rlim_cur: 1024,
                 rlim_max: 1024,
@@ -1247,9 +1265,15 @@ fn spawn_process(
                 rlim_cur: 300,
                 rlim_max: 300,
             };
+            // 1 hour CPU time cap — kills infinite loops without affecting normal operation.
+            let cpu = rlimit {
+                rlim_cur: 3600,
+                rlim_max: 3600,
+            };
             let _ = setrlimit(RLIMIT_AS, &mem);
             let _ = setrlimit(RLIMIT_NOFILE, &files);
             let _ = setrlimit(RLIMIT_NPROC, &procs);
+            let _ = setrlimit(RLIMIT_CPU, &cpu);
             Ok(())
         });
     }

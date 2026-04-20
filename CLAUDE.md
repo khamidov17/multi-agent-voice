@@ -25,7 +25,7 @@ Each bot = three OS processes: wrapper (crash recovery) → harness (Rust, Teleg
 │  Token: NOVA_BOT_TOKEN                                               │
 │  full_permissions: true  │  owner_dms_only: true                     │
 │  Claude Code: Bash, Edit, Write, Read, WebSearch                     │
-│  Model: claude-opus-4-6                                              │
+│  Model: claude-opus-4-7                                              │
 │  Config: nova.json  │  Data: data/nova/                              │
 │                                                                      │
 │  Responsibilities:                                                   │

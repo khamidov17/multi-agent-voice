@@ -211,6 +211,7 @@ impl BotState {
                 session_file,
                 config.full_permissions,
                 config.tools_override.clone(),
+                Some(config.model.clone()),
             ) {
                 Ok(cc) => cc,
                 Err(e) => {
@@ -229,8 +230,6 @@ impl BotState {
             let mut engine = ChatbotEngine::new(chatbot_config, telegram, claude_code);
             engine.run_startup_checks().await;
             engine.start_debouncer();
-            engine.notify_owner("hey, just restarted").await;
-
             info!("Chatbot enabled (primary chat: {})", primary_chat_id);
             Some(engine)
         } else {

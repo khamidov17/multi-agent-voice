@@ -14,6 +14,10 @@ use std::time::Duration;
 use teloxide::prelude::*;
 use tracing::{error, info, warn};
 
+/// Cooldown between owner alerts for the same issue (milliseconds).
+/// Prevents spamming the owner with repeated alerts every 60s check cycle.
+const ALERT_COOLDOWN_MS: u64 = 3_600_000; // 1 hour
+
 /// Maximum acceptable age for a CC heartbeat before we warn (seconds).
 const HEARTBEAT_STALE_SECS: u64 = 120;
 
@@ -251,48 +255,72 @@ fn check_crossbot_heartbeat(bot_name: &str, db_path: &PathBuf) {
         return;
     }
 
-    match rusqlite::Connection::open(db_path) {
+    let conn = match rusqlite::Connection::open(db_path) {
         Err(e) => {
             warn!(
                 "[health] Could not open cross-bot DB at {}: {e}",
                 db_path.display()
             );
+            return;
         }
-        Ok(conn) => {
-            // Find the most recent message that was NOT sent by this bot.
-            let result: rusqlite::Result<String> = conn.query_row(
-                "SELECT MAX(created_at) FROM bot_messages WHERE from_bot != ?1",
-                rusqlite::params![bot_name],
-                |row| row.get(0),
-            );
+        Ok(c) => c,
+    };
 
-            match result {
-                Err(e) => {
-                    warn!("[health] Cross-bot heartbeat query failed: {e}");
-                }
-                Ok(ts) => {
-                    // Parse the ISO-8601 datetime stored by SQLite
-                    // ("YYYY-MM-DD HH:MM:SS") and compute age.
-                    let age_secs = parse_sqlite_datetime_age_secs(&ts);
-                    match age_secs {
-                        None => {
-                            info!("[health] Cross-bot: no peer messages found for {bot_name}");
-                        }
-                        Some(age) if age > CROSSBOT_STALE_SECS => {
-                            warn!(
-                                "[health] Cross-bot STALE — last peer message {age}s ago \
-                                 (bot {bot_name})"
-                            );
-                        }
-                        Some(age) => {
-                            info!(
-                                "[health] Cross-bot OK — last peer message {age}s ago \
-                                 ({bot_name})"
-                            );
-                        }
+    // Primary: check the heartbeats table (written by engine.rs on every turn).
+    let mut found_heartbeats = false;
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT bot_name, last_heartbeat, status, current_task FROM heartbeats WHERE bot_name != ?1",
+    ) && let Ok(rows) = stmt.query_map(rusqlite::params![bot_name], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+    {
+            for row in rows.flatten() {
+                found_heartbeats = true;
+                let (peer, ts, status, task) = row;
+                let age = parse_sqlite_datetime_age_secs(&ts);
+                let status_str = status.as_deref().unwrap_or("?");
+                let task_str = task.as_deref().unwrap_or("");
+                match age {
+                    None => {
+                        warn!("[health] Peer {peer}: heartbeat timestamp unparseable");
+                    }
+                    Some(a) if a > CROSSBOT_STALE_SECS => {
+                        warn!(
+                            "[health] Peer {peer} STALE — heartbeat {a}s ago (status={status_str})"
+                        );
+                    }
+                    Some(a) => {
+                        info!(
+                            "[health] Peer {peer} OK — {a}s ago (status={status_str} task={task_str})"
+                        );
                     }
                 }
             }
+    }
+
+    // Fallback: if no heartbeats table entries, check bot_messages timestamps.
+    if !found_heartbeats {
+        let result: rusqlite::Result<String> = conn.query_row(
+            "SELECT MAX(created_at) FROM bot_messages WHERE from_bot != ?1",
+            rusqlite::params![bot_name],
+            |row| row.get(0),
+        );
+        match result {
+            Err(e) => warn!("[health] Cross-bot fallback query failed: {e}"),
+            Ok(ts) => match parse_sqlite_datetime_age_secs(&ts) {
+                None => info!("[health] Cross-bot: no peer activity found for {bot_name}"),
+                Some(age) if age > CROSSBOT_STALE_SECS => {
+                    warn!("[health] Cross-bot STALE — last peer message {age}s ago ({bot_name})");
+                }
+                Some(age) => {
+                    info!("[health] Cross-bot OK — last peer message {age}s ago ({bot_name})");
+                }
+            },
         }
     }
 }
@@ -328,9 +356,21 @@ pub(crate) fn parse_sqlite_datetime_age_secs(ts: &str) -> Option<u64> {
     Some(now.saturating_sub(then))
 }
 
-/// Send an alert DM to the owner. Silently swallows errors (best-effort).
+/// Send an alert DM to the owner, rate-limited to 1 per hour.
+/// Prevents flooding the owner when a bot stays down for extended periods.
 async fn alert_owner(bot: &Bot, owner_chat_id: Option<i64>, message: &str) {
+    static LAST_ALERT_MS: AtomicU64 = AtomicU64::new(0);
+
     let Some(chat_id) = owner_chat_id else { return };
+
+    let now = current_unix_ms();
+    let last = LAST_ALERT_MS.load(Ordering::SeqCst);
+    if last > 0 && now.saturating_sub(last) < ALERT_COOLDOWN_MS {
+        info!("[health] Suppressing owner alert (cooldown active): {message}");
+        return;
+    }
+    LAST_ALERT_MS.store(now, Ordering::SeqCst);
+
     if let Err(e) = bot
         .send_message(teloxide::types::ChatId(chat_id), message)
         .await

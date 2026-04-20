@@ -5,7 +5,7 @@ use tracing::{debug, warn};
 
 use crate::chatbot::database::Database;
 use crate::chatbot::engine::ChatbotConfig;
-use crate::chatbot::tools::get_tool_definitions;
+// Tool definitions are passed via --json-schema CLI flag, not in the system prompt.
 
 /// Build role-specific identity and behavior section based on bot name.
 pub(crate) fn build_role_section(bot_name: &str, full_permissions: bool) -> String {
@@ -379,12 +379,7 @@ pub fn system_prompt(
         None => "No trusted owner configured".to_string(),
     };
 
-    let tools = get_tool_definitions();
-    let tool_list: String = tools
-        .iter()
-        .map(|t| format!("- {}: {}", t.name, t.description))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Tool definitions are passed via --json-schema CLI flag, not in the prompt.
 
     let preloaded_memories = load_startup_memories(config);
 
@@ -1010,10 +1005,6 @@ Use `query` to search the SQLite database with SQL SELECT statements.
 - Active users: SELECT username, message_count FROM users WHERE status = 'member' ORDER BY message_count DESC LIMIT 10
 - Messages on date: SELECT * FROM messages WHERE timestamp >= '2024-01-15' AND timestamp < '2024-01-16' LIMIT 50
 - User info: SELECT * FROM users WHERE user_id = 123456
-
-# Tools
-
-{tool_list}
 
 Output format: Return a JSON object with:
 - "action": "stop" (when done), "sleep" (to pause and wait), or "heartbeat" (still working)

@@ -29,7 +29,7 @@ impl Model {
     fn as_str(&self) -> &'static str {
         match self {
             Model::Haiku => "claude-haiku-4-5-20251001",
-            Model::Sonnet => "claude-sonnet-4-5-20250929",
+            Model::Sonnet => "claude-sonnet-4-6",
         }
     }
 }

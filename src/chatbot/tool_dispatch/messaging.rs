@@ -294,10 +294,25 @@ pub(super) async fn execute_send_file(
         return Err(format!("File not found: {}", file_path));
     }
 
-    let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {e}"))?;
-    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    // Defense-in-depth: canonicalize to resolve symlinks and reject sensitive paths.
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve path: {e}"))?;
+    let canonical_str = canonical.to_string_lossy();
+    let blocked_prefixes = ["/etc/", "/proc/", "/sys/", "/dev/"];
+    for prefix in &blocked_prefixes {
+        if canonical_str.starts_with(prefix) {
+            return Err(format!("Blocked: cannot send files from {prefix}"));
+        }
+    }
 
-    info!("📎 Sending file: {} ({} bytes)", filename, data.len());
+    let data = std::fs::read(&canonical).map_err(|e| format!("Failed to read file: {e}"))?;
+    let filename = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+
+    info!("Sending file: {} ({} bytes)", filename, data.len());
 
     let cap = caption.unwrap_or(filename);
     let msg_id = telegram

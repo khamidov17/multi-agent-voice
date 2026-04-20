@@ -280,6 +280,20 @@ impl ChatbotEngine {
 
                         info!("Processing {} message(s)", messages.len());
 
+                        // Write "working" heartbeat so peers know we're active.
+                        if let Some(ref db_path) = config.shared_bot_messages_db
+                            && let Ok(bus) =
+                                crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+                        {
+                            let task_hint: String =
+                                messages.first().map(|m| m.text.chars().take(60).collect()).unwrap_or_default();
+                            let _ = bus.heartbeat_with_status(
+                                &config.bot_name,
+                                "working",
+                                Some(&task_hint),
+                            );
+                        }
+
                         let timeout_secs = if config.full_permissions {
                             MAX_PROCESSING_SECS_FULL
                         } else {
@@ -356,6 +370,17 @@ impl ChatbotEngine {
 
                         is_processing.store(false, Ordering::SeqCst);
 
+                        // Write heartbeat to shared DB so peer bots know we're alive.
+                        // This is the ONLY place heartbeats are written — once per turn.
+                        if let Some(ref db_path) = config.shared_bot_messages_db
+                            && let Ok(bus) =
+                                crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+                            && let Err(e) =
+                                bus.heartbeat_with_status(&config.bot_name, "idle", None)
+                        {
+                            warn!("Failed to write heartbeat: {e}");
+                        }
+
                         // Autonomous continuation: after CC STOP, check if there
                         // are pending bot-to-bot task messages that need a new turn.
                         // Without this, multi-step tasks stall because nothing
@@ -411,8 +436,8 @@ impl ChatbotEngine {
 
                         if needs_retrigger {
                             // Signal the watcher task to call debouncer.trigger().
-                            // Small delay lets is_processing=false settle.
-                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            // is_processing is already false (SeqCst store above) —
+                            // no artificial delay needed; atomic ops are immediately visible.
                             retrigger.notify_one();
                         }
                     });
@@ -696,6 +721,7 @@ impl ChatbotEngine {
             None,  // No session persistence — stateless quick responses
             false, // Never full_permissions
             quick_tools,
+            Some("sonnet".to_string()), // Quick lane always uses sonnet
         ) {
             Ok(cc) => Arc::new(Mutex::new(cc)),
             Err(e) => {
@@ -808,10 +834,12 @@ impl ChatbotEngine {
 
         // Route to the correct lane
         if self.config.dual_lane_enabled {
-            let deep_is_busy = self.is_processing.load(Ordering::SeqCst);
-            let lane = crate::chatbot::dual_lane::route_message(&msg, deep_is_busy);
-            match lane {
-                crate::chatbot::dual_lane::Lane::Quick => {
+            // Owner messages ALWAYS go to deep lane — never get a "I'm busy" quick ack
+            let is_owner = self.config.owner_user_id == Some(msg.user_id);
+            if !is_owner {
+                let deep_is_busy = self.is_processing.load(Ordering::SeqCst);
+                let lane = crate::chatbot::dual_lane::route_message(&msg, deep_is_busy);
+                if lane == crate::chatbot::dual_lane::Lane::Quick {
                     info!("🔀 Routing to QUICK lane (deep lane busy)");
                     let mut p = self.quick_pending.lock().await;
                     p.push(msg);
@@ -819,9 +847,6 @@ impl ChatbotEngine {
                         debouncer.trigger().await;
                     }
                     return;
-                }
-                crate::chatbot::dual_lane::Lane::Deep => {
-                    // Fall through to deep lane below
                 }
             }
         }
@@ -1438,9 +1463,9 @@ async fn save_turn_snapshot(
 /// - Short timeout (30s) and few iterations (3)
 /// - No mid-turn injection, no sleep/heartbeat, no reflection
 async fn process_quick_messages(
-    config: &ChatbotConfig,
-    context: &Mutex<ContextBuffer>,
-    database: &Mutex<Database>,
+    _config: &ChatbotConfig,
+    _context: &Mutex<ContextBuffer>,
+    _database: &Mutex<Database>,
     telegram: &TelegramClient,
     claude: &Mutex<ClaudeCode>,
     messages: &[ChatMessage],
@@ -1465,7 +1490,6 @@ async fn process_quick_messages(
     let mut response = claude.send_message(raw_messages).await?;
 
     let default_reply_to = messages.last().map(|m| m.message_id);
-    let mut memory_files_read: HashSet<String> = HashSet::new();
 
     for iteration in 0..MAX_ITERATIONS_QUICK {
         let action = response.action.as_str();
@@ -1476,7 +1500,7 @@ async fn process_quick_messages(
             response.tool_calls.len()
         );
 
-        // Execute tool calls
+        // Execute tool calls — quick lane only supports send_message, skip consensus gate
         let mut results = Vec::new();
         for tc in &response.tool_calls {
             if matches!(tc.call, ToolCall::Done) {
@@ -1490,16 +1514,40 @@ async fn process_quick_messages(
             }
 
             let tool_start = std::time::Instant::now();
-            let result = tool_dispatch::execute_tool(
-                tc,
-                config,
-                context,
-                database,
-                telegram,
-                &mut memory_files_read,
-                default_reply_to,
-            )
-            .await;
+            // Quick lane: only allow send_message, block everything else.
+            // Skip consensus gate and callbacks (unnecessary for quick acks).
+            let result = if let ToolCall::SendMessage {
+                chat_id,
+                text,
+                reply_to_message_id,
+            } = &tc.call
+            {
+                let reply_to = reply_to_message_id.or(default_reply_to);
+                match telegram.send_message(*chat_id, text, reply_to).await {
+                    Ok(msg_id) => ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: Some(format!("sent (message_id: {})", msg_id)),
+                        is_error: false,
+                        image: None,
+                    },
+                    Err(e) => ToolResult {
+                        tool_use_id: tc.id.clone(),
+                        content: Some(format!("error: {}", e)),
+                        is_error: true,
+                        image: None,
+                    },
+                }
+            } else {
+                ToolResult {
+                    tool_use_id: tc.id.clone(),
+                    content: Some(
+                        "Quick lane only supports send_message. Use the deep lane for other tools."
+                            .to_string(),
+                    ),
+                    is_error: true,
+                    image: None,
+                }
+            };
             let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
             let tool_name = {
                 let raw = format!("{:?}", tc.call);

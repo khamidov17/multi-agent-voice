@@ -84,11 +84,13 @@ pub(super) fn execute_now(utc_offset: Option<i32>) -> Result<Option<String>, Str
     )))
 }
 
-/// Report a bug to the developer feedback file.
+/// Report a bug to the developer feedback file AND notify Nova via shared bus.
 pub(super) async fn execute_report_bug(
     data_dir: Option<&PathBuf>,
     description: &str,
     severity: Option<&str>,
+    bot_name: &str,
+    shared_db: Option<&PathBuf>,
 ) -> Result<Option<String>, String> {
     let data_dir = data_dir.ok_or("No data_dir configured")?;
     let feedback_file = data_dir.join("feedback.log");
@@ -102,9 +104,9 @@ pub(super) async fn execute_report_bug(
     );
 
     let preview: String = description.chars().take(50).collect();
-    info!("🐛 Bug report ({}): {}", severity, preview);
+    info!("Bug report ({}): {}", severity, preview);
 
-    // Append to feedback file
+    // Append to local feedback file
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -115,7 +117,26 @@ pub(super) async fn execute_report_bug(
     file.write_all(entry.as_bytes())
         .map_err(|e| format!("Failed to write feedback: {e}"))?;
 
-    Ok(None) // Action tool - developer will see it via the poller
+    // Route to Nova via shared bot_messages bus so it can investigate autonomously.
+    if let Some(db_path) = shared_db
+        && let Ok(bus) = crate::chatbot::bot_messages::BotMessageDb::open(db_path)
+    {
+        let alert_msg = format!(
+            "[BUG_REPORT] severity={severity} from={bot_name}: {description}"
+        );
+        if let Err(e) = bus.insert_typed(
+            bot_name,
+            Some("Nova"),
+            &alert_msg,
+            crate::chatbot::bot_messages::message_type::ALERT,
+            None,
+            None,
+        ) {
+            warn!("Failed to route bug report to Nova: {e}");
+        }
+    }
+
+    Ok(None) // Action tool — Nova receives via bus, owner sees in feedback.log
 }
 
 /// Get system performance metrics (GetMetrics tool).

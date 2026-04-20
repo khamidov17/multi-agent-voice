@@ -93,6 +93,13 @@ struct ConfigFile {
     /// Daily token budget for cognitive loop (default 500000).
     #[serde(default = "default_cognitive_token_budget")]
     cognitive_token_budget: u64,
+    /// Claude model to use (e.g. "opus", "sonnet"). Default: "sonnet".
+    #[serde(default = "default_model")]
+    model: String,
+}
+
+fn default_model() -> String {
+    "sonnet".to_string()
 }
 
 fn default_cognitive_token_budget() -> u64 {
@@ -171,6 +178,8 @@ pub struct Config {
     pub quick_lane_model: Option<String>,
     /// Daily token budget for cognitive loop.
     pub cognitive_token_budget: u64,
+    /// Claude model (e.g. "opus", "sonnet").
+    pub model: String,
 }
 
 impl Config {
@@ -252,6 +261,7 @@ impl Config {
             dual_lane_enabled: file.dual_lane_enabled,
             quick_lane_model: file.quick_lane_model,
             cognitive_token_budget: file.cognitive_token_budget,
+            model: file.model,
         }
     }
 
