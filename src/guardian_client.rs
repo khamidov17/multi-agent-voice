@@ -80,6 +80,7 @@ impl WriteResult {
 
 pub struct GuardianClient {
     socket_path: PathBuf,
+    // Key bytes — never Debug-printed (see Debug impl below).
     key: Vec<u8>,
     nonce: AtomicU64,
     /// Serializes writes so multiple harness threads take turns talking
@@ -88,6 +89,18 @@ pub struct GuardianClient {
     connect_lock: Mutex<()>,
     /// Timeout for both read and write on the UDS stream.
     timeout: Duration,
+}
+
+// Manual Debug so the HMAC key never leaks into logs via `{:?}`.
+impl std::fmt::Debug for GuardianClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuardianClient")
+            .field("socket_path", &self.socket_path)
+            .field("key", &"<redacted>")
+            .field("nonce", &self.nonce.load(Ordering::Relaxed))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl GuardianClient {

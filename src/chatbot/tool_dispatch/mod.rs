@@ -5,6 +5,7 @@ mod memory;
 mod messaging;
 mod moderation;
 mod planning;
+mod protected_write;
 mod reflection;
 mod tools_custom;
 mod utility;
@@ -661,36 +662,77 @@ pub(crate) async fn execute_tool(
         } => utility::execute_set_state(config, key, value, workflow_id.as_deref()).await,
         ToolCall::GetState { key } => utility::execute_get_state(config, key).await,
         ToolCall::GetTokenBudget {} => utility::execute_get_token_budget(database, config).await,
+        ToolCall::ProtectedWrite {
+            path,
+            content,
+            reason,
+        } => {
+            // Early-return with a pre-built ToolResult so the structured
+            // JSON response (denied/err carries err_code, alt_roots, etc.)
+            // reaches Nova verbatim without being flattened to a plain
+            // `Err(String)`. Mirrors the GetUserInfo pattern above.
+            return protected_write::execute_protected_write(
+                &tc.id, config, database, path, content, reason,
+            )
+            .await;
+        }
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
     };
 
     // Auto-save debug state after every tool call (crash recovery)
-    if let Some(ref data_dir) = config.data_dir {
-        let debug_path = data_dir.join("debug_state.json");
-        // Extract only the tool variant name, not field values (avoids leaking sensitive data)
+    // + Phase 0 observability: emit a journal tool_call entry so the
+    //   guardian failure post-mortem has a machine-readable record of
+    //   every Nova action, not just file-log text. Keeps the
+    //   "watch-then-understand" loop in the design doc viable.
+    let tool_variant_name = {
         let tool_name = format!("{:?}", tc.call);
-        let tool_name = tool_name
+        tool_name
             .split(['{', '('])
             .next()
             .unwrap_or("unknown")
             .trim()
-            .to_string();
-        // Redact result preview — only show length and success/error, not content
-        let result_preview = match &result {
-            Ok(Some(s)) => format!("OK ({} chars)", s.len()),
-            Ok(None) => "OK (null)".to_string(),
-            Err(e) => format!("ERROR: {}", e.chars().take(100).collect::<String>()),
-        };
+            .to_string()
+    };
+    let (result_is_error, result_preview) = match &result {
+        Ok(Some(s)) => (false, format!("OK ({} chars)", s.len())),
+        Ok(None) => (false, "OK (null)".to_string()),
+        Err(e) => (
+            true,
+            format!("ERROR: {}", e.chars().take(100).collect::<String>()),
+        ),
+    };
+
+    if let Some(ref data_dir) = config.data_dir {
+        let debug_path = data_dir.join("debug_state.json");
         let debug_json = serde_json::json!({
-            "last_tool": tool_name,
-            "last_result_preview": result_preview,
-            "is_error": result.is_err(),
+            "last_tool": &tool_variant_name,
+            "last_result_preview": &result_preview,
+            "is_error": result_is_error,
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
         let _ = std::fs::write(
             &debug_path,
             serde_json::to_string_pretty(&debug_json).unwrap_or_default(),
+        );
+    }
+
+    // Phase 0 journal emission. Best-effort; never fails the hot path.
+    {
+        let db = database.lock().await;
+        let conn = db.connection();
+        crate::chatbot::journal::emit(
+            conn,
+            None,
+            crate::chatbot::journal::ENTRY_TOOL_CALL,
+            &format!(
+                "{}: {}",
+                tool_variant_name,
+                if result_is_error { "error" } else { "ok" }
+            ),
+            &result_preview,
+            &[],
+            &[config.bot_name.clone(), tool_variant_name.clone()],
         );
     }
 

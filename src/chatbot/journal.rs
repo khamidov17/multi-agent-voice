@@ -2,9 +2,73 @@
 //!
 //! Records decisions, actions, observations, errors, and milestones.
 //! Survives session resets. Searchable via full-text LIKE queries.
+//!
+//! # Phase 0 entry types
+//!
+//! The following entry_type constants are used by Phase 0 observability
+//! instrumentation. Keep them stable — queries in post-mortem tooling
+//! will grep for these exact strings.
+//!
+//! - [`ENTRY_TOOL_CALL`] — a single MCP tool invocation. One per tool,
+//!   emitted at the END of dispatch with success/error.
+//! - [`ENTRY_TG_SEND`] — a Telegram `sendMessage` call resolved. Subset
+//!   of tool_call for send_message specifically, with HTTP status.
+//! - [`ENTRY_GUARDIAN_ALLOW`], [`ENTRY_GUARDIAN_DENY`],
+//!   [`ENTRY_GUARDIAN_ERROR`] — outcomes of `protected_write` calls.
+//!
+//! These events emit through the same `add_entry` path as everything
+//! else; they share the shared `Mutex<Connection>` with the engine's
+//! own journal writes. A dedicated writer task that decouples these
+//! from the engine hot-path is tracked in TODOS.md (HC2 from the
+//! autoplan Eng review).
 
 use serde::{Deserialize, Serialize};
 use tracing::info;
+
+/// Phase 0 entry_type — one completed MCP tool invocation.
+pub const ENTRY_TOOL_CALL: &str = "tool_call";
+/// Phase 0 entry_type — one outbound Telegram send resolved (success/error).
+pub const ENTRY_TG_SEND: &str = "tg.send";
+/// Phase 0 entry_type — guardian accepted a protected_write.
+pub const ENTRY_GUARDIAN_ALLOW: &str = "guardian.allow";
+/// Phase 0 entry_type — guardian denied a protected_write (protected path or outside allowed root).
+pub const ENTRY_GUARDIAN_DENY: &str = "guardian.deny";
+/// Phase 0 entry_type — guardian returned a non-denial error (RPC failure, IO failure, etc.).
+pub const ENTRY_GUARDIAN_ERROR: &str = "guardian.error";
+
+/// Best-effort convenience wrapper around [`add_entry`] that never bubbles
+/// an error up the caller's hot path — Phase 0 observability must not kill
+/// the engine. Failures are logged via `tracing::warn!` and swallowed.
+///
+/// Use this for observability events that are additive and tolerable to
+/// lose on disk pressure / mutex poison. For critical audit writes
+/// (billing, security), keep calling `add_entry` and handle the `Result`.
+pub fn emit(
+    conn: &std::sync::Mutex<rusqlite::Connection>,
+    task_id: Option<&str>,
+    entry_type: &str,
+    summary: &str,
+    detail: &str,
+    participants: &[String],
+    tags: &[String],
+) {
+    if let Err(e) = add_entry(
+        conn,
+        task_id,
+        entry_type,
+        summary,
+        detail,
+        participants,
+        tags,
+    ) {
+        tracing::warn!(
+            entry_type,
+            summary,
+            err = %e,
+            "journal emit failed (non-fatal); observability will miss this event"
+        );
+    }
+}
 
 /// A journal entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]

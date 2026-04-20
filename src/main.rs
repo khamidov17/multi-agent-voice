@@ -111,6 +111,46 @@ impl BotState {
                 .join("shared")
                 .join("bot_messages.db");
 
+            // Phase 0 — construct the bootstrap guardian client if the
+            // config enables it AND the socket + key paths are reachable.
+            // When any of these fail, log a warning and proceed without
+            // the client; the MCP `protected_write` tool will return a
+            // structured error to Nova until the setup is fixed.
+            let guardian_client: Option<std::sync::Arc<guardian_client::GuardianClient>> = if config
+                .guardian_enabled
+            {
+                match (&config.guardian_socket_path, &config.guardian_key_path) {
+                    (Some(sock), Some(key)) => {
+                        match guardian_client::GuardianClient::new(sock, key) {
+                            Ok(c) => {
+                                info!(
+                                    socket = %sock.display(),
+                                    "Bootstrap guardian client ready"
+                                );
+                                Some(std::sync::Arc::new(c))
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "guardian_enabled=true but client construction failed: {}. \
+                                 protected_write will be unavailable until fixed.",
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    }
+                    _ => {
+                        warn!(
+                            "guardian_enabled=true but guardian_socket_path or guardian_key_path is missing in config. \
+                             protected_write will be unavailable."
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             let chatbot_config = ChatbotConfig {
                 primary_chat_id,
                 bot_user_id,
@@ -144,6 +184,8 @@ impl BotState {
                 dual_lane_enabled: config.dual_lane_enabled,
                 quick_lane_model: config.quick_lane_model.clone(),
                 cognitive_daily_token_budget: config.cognitive_token_budget,
+                guardian_client,
+                nova_use_protected_write: config.nova_use_protected_write,
             };
 
             // Fetch available TTS voices if endpoint configured
@@ -481,9 +523,24 @@ fn parse_args() -> (bool, String) {
     (wrapper_mode, config_path)
 }
 
-/// Delete `claudir.log.*` files in `log_dir` whose mtime is older than
-/// `max_age_days`. Best-effort: logs any per-file error but does not
-/// abort the sweep. Phase 0 log rotation.
+/// Maximum size a single `claudir.log.*` file may reach before the sweeper
+/// force-rotates it. Matches the 100 MiB cap called out in the Phase 0
+/// design doc.
+const LOG_ROTATE_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Retention + size-cap sweeper for `claudir.log.*`.
+///
+/// Two passes on every tick:
+/// 1. **Age-based deletion.** Anything older than `max_age_days` is removed.
+/// 2. **Size-based force rotation.** If a file exceeds `LOG_ROTATE_MAX_BYTES`,
+///    it's renamed with a `.oversized-<unix_ts>` suffix. The rename is what
+///    closes the "100 MB intra-day burst" gap called out in the Eng review
+///    (TG1): `tracing-appender::rolling::daily` normally only rotates at UTC
+///    midnight, but renaming its open file on disk forces it to reopen the
+///    target on the next write and start a fresh file.
+///
+/// Best-effort throughout: per-file errors are logged via `tracing::warn!`
+/// and skipped. Phase 0 rule: observability must not kill the engine.
 async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()> {
     let cutoff = std::time::SystemTime::now()
         .checked_sub(Duration::from_secs(max_age_days * 24 * 60 * 60))
@@ -491,13 +548,15 @@ async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()
 
     let mut read_dir = tokio::fs::read_dir(log_dir).await?;
     let mut deleted = 0usize;
+    let mut oversized = 0usize;
     while let Some(entry) = read_dir.next_entry().await? {
         let path = entry.path();
         let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
+            Some(n) => n.to_string(),
             None => continue,
         };
-        // Match either `claudir.log` itself or `claudir.log.<suffix>` (daily stamp).
+        // Match `claudir.log` itself or `claudir.log.<suffix>` (daily stamp /
+        // oversized-rotated file).
         if !name.starts_with("claudir.log") {
             continue;
         }
@@ -512,11 +571,43 @@ async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()
             Ok(t) => t,
             Err(_) => continue,
         };
+
+        // Pass 1: age-based deletion.
         if mtime < cutoff {
             if let Err(e) = tokio::fs::remove_file(&path).await {
                 warn!("log sweeper: remove {} failed: {}", path.display(), e);
             } else {
                 deleted += 1;
+            }
+            continue;
+        }
+
+        // Pass 2: size-based force rotation. Skip files we already renamed.
+        if name.contains(".oversized-") {
+            continue;
+        }
+        if meta.len() > LOG_ROTATE_MAX_BYTES {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let rotated = path.with_file_name(format!("{}.oversized-{}", name, ts));
+            if let Err(e) = tokio::fs::rename(&path, &rotated).await {
+                warn!(
+                    "log sweeper: size rotate {} -> {} failed: {}",
+                    path.display(),
+                    rotated.display(),
+                    e
+                );
+            } else {
+                oversized += 1;
+                info!(
+                    "log sweeper: force-rotated {} ({} bytes > {} cap) -> {}",
+                    path.display(),
+                    meta.len(),
+                    LOG_ROTATE_MAX_BYTES,
+                    rotated.display()
+                );
             }
         }
     }
@@ -525,6 +616,9 @@ async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()
             "log sweeper: removed {} files older than {} days",
             deleted, max_age_days
         );
+    }
+    if oversized > 0 {
+        info!("log sweeper: force-rotated {} oversized files", oversized);
     }
     Ok(())
 }

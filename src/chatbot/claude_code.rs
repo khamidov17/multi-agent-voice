@@ -192,6 +192,10 @@ struct WorkerConfig {
     session_file: Option<PathBuf>,
     full_permissions: bool,
     tools_override: Option<String>,
+    /// Phase 0 shadow-mode flag. When true AND `full_permissions` is true,
+    /// Nova's Claude Code spawns with `Bash,Read,WebSearch` (no Edit/Write);
+    /// the AI is expected to call the MCP `protected_write` tool instead.
+    use_protected_write: bool,
 }
 
 impl ClaudeCode {
@@ -204,6 +208,26 @@ impl ClaudeCode {
         session_file: Option<PathBuf>,
         full_permissions: bool,
         tools_override: Option<String>,
+    ) -> Result<Self, String> {
+        Self::start_with_guardian(
+            system_prompt,
+            session_file,
+            full_permissions,
+            tools_override,
+            false,
+        )
+    }
+
+    /// Phase 0: start Claude Code with explicit control over whether Nova's
+    /// tool string drops `Edit, Write` in favor of the MCP `protected_write`
+    /// shim. Call this from `ChatbotEngine::new` when `nova_use_protected_write`
+    /// is true AND `full_permissions` is true.
+    pub fn start_with_guardian(
+        system_prompt: String,
+        session_file: Option<PathBuf>,
+        full_permissions: bool,
+        tools_override: Option<String>,
+        use_protected_write: bool,
     ) -> Result<Self, String> {
         let (msg_tx, msg_rx) = mpsc::channel::<WorkerMessage>(32);
         let (resp_tx, resp_rx) = mpsc::channel::<Response>(32);
@@ -233,6 +257,7 @@ impl ClaudeCode {
             session_file,
             full_permissions,
             tools_override,
+            use_protected_write,
         };
 
         std::thread::spawn(move || {
@@ -747,7 +772,7 @@ fn save_session_id(path: &Path, session_id: &str) {
 /// Set up a fresh Claude Code process, send the init message, and wait until ready.
 /// Returns (process, stdin, out_rx, stderr_buf). Updates `session_id` in place.
 /// `stderr_buf` is Feature 3: last 10 stderr lines for crash diagnostics.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn setup_claude_process(
     system_prompt: &str,
     resume_session: Option<&str>,
@@ -755,6 +780,7 @@ fn setup_claude_process(
     session_id: &mut Option<String>,
     full_permissions: bool,
     tools_override: &Option<String>,
+    use_protected_write: bool,
     atomics: &WorkerAtomics,
 ) -> Result<
     (
@@ -765,11 +791,12 @@ fn setup_claude_process(
     ),
     String,
 > {
-    let mut process = spawn_process(
+    let mut process = spawn_process_with_guardian(
         system_prompt,
         resume_session,
         full_permissions,
         tools_override,
+        use_protected_write,
     )?;
     let mut stdin = process.stdin.take().ok_or("No stdin")?;
     let stdout = process.stdout.take().ok_or("No stdout")?;
@@ -896,7 +923,10 @@ fn setup_claude_process(
             Some(OutputMessage::System(sys))
                 if sys.subtype.is_none() || sys.subtype.as_deref() == Some("init") =>
             {
-                // Build the allowed tools list based on config
+                // Build the allowed tools list based on config — MUST mirror
+                // the `--tools` string built in spawn_process_with_guardian()
+                // exactly, otherwise the SECURITY check below false-positives
+                // or false-negatives.
                 let mut allowed_set: Vec<&str> = vec!["StructuredOutput"];
                 if let Some(ov) = tools_override {
                     // Custom tools: parse comma-separated list
@@ -906,6 +936,10 @@ fn setup_claude_process(
                             allowed_set.push(Box::leak(t.to_string().into_boxed_str()));
                         }
                     }
+                } else if full_permissions && use_protected_write {
+                    // Phase 0 shadow-mode: Edit/Write dropped, writes routed
+                    // through MCP `protected_write` → bootstrap guardian.
+                    allowed_set.extend_from_slice(&["WebSearch", "Bash", "Read"]);
                 } else if full_permissions {
                     allowed_set.extend_from_slice(&["WebSearch", "Bash", "Read", "Edit", "Write"]);
                 } else {
@@ -962,6 +996,7 @@ fn worker_loop(
         &mut session_id,
         cfg.full_permissions,
         &cfg.tools_override,
+        cfg.use_protected_write,
         &atomics,
     )?;
 
@@ -1016,6 +1051,7 @@ fn worker_loop(
                 &mut session_id,
                 cfg.full_permissions,
                 &cfg.tools_override,
+                cfg.use_protected_write,
                 &atomics,
             ) {
                 Ok((new_proc, new_stdin, new_out_rx, new_stderr_buf)) => {
@@ -1129,6 +1165,7 @@ fn worker_loop(
                 &mut session_id,
                 cfg.full_permissions,
                 &cfg.tools_override,
+                cfg.use_protected_write,
                 &atomics,
             ) {
                 Ok((new_proc, new_stdin, new_out_rx, new_stderr_buf)) => {
@@ -1182,6 +1219,31 @@ fn spawn_process(
     full_permissions: bool,
     tools_override: &Option<String>,
 ) -> Result<Child, String> {
+    spawn_process_with_guardian(
+        system_prompt,
+        resume_session,
+        full_permissions,
+        tools_override,
+        false,
+    )
+}
+
+/// Phase 0: variant of spawn_process that takes an additional
+/// `use_protected_write` flag. When true AND `full_permissions` is true,
+/// Nova's Claude Code tool string drops `Edit, Write` — the only path to
+/// write files becomes the MCP `protected_write` tool that routes through
+/// the bootstrap guardian.
+///
+/// The old spawn_process() stays as a thin wrapper for backwards
+/// compatibility inside the crate; the harness's top-level entry point
+/// calls this directly.
+fn spawn_process_with_guardian(
+    system_prompt: &str,
+    resume_session: Option<&str>,
+    full_permissions: bool,
+    tools_override: &Option<String>,
+    use_protected_write: bool,
+) -> Result<Child, String> {
     let schema: serde_json::Value =
         serde_json::from_str(TOOL_CALLS_SCHEMA).map_err(|e| format!("Bad schema: {}", e))?;
     let schema_str =
@@ -1189,12 +1251,18 @@ fn spawn_process(
 
     // SECURITY: Tool selection by tier, with optional override.
     // Tier 1 (full_permissions=true): Bash,Edit,Write,Read,WebSearch
+    //   Or when nova_use_protected_write=true: Bash,Read,WebSearch
+    //   (Edit/Write dropped — writes route through MCP `protected_write`
+    //    to the bootstrap guardian, which refuses modifications to the
+    //    harness source, configs, and supervisor.)
     // Tier 2 (full_permissions=false): WebSearch only
     // Custom: tools_override (e.g. "Bash,Read,WebSearch" for Sentinel eval)
     let tools_string;
     let tools: &str = if let Some(override_tools) = tools_override {
         tools_string = override_tools.clone();
         &tools_string
+    } else if full_permissions && use_protected_write {
+        "Bash,Read,WebSearch"
     } else if full_permissions {
         "Bash,Edit,Write,Read,WebSearch"
     } else {

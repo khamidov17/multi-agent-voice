@@ -113,6 +113,15 @@ pub struct ChatbotConfig {
     pub quick_lane_model: Option<String>,
     /// Daily token budget for cognitive loop (default 500_000).
     pub cognitive_daily_token_budget: u64,
+    /// Bootstrap-guardian client. Present only when the config enables
+    /// the guardian AND the socket + key files exist at startup. When
+    /// `None`, MCP `protected_write` calls return a tool error.
+    pub guardian_client: Option<Arc<crate::guardian_client::GuardianClient>>,
+    /// Phase 0 shadow-mode flag. When true, Nova's Claude Code tool
+    /// string drops `Edit, Write` and Nova is expected to route writes
+    /// through the MCP `protected_write` tool. Default false — Nova keeps
+    /// existing tools until the operator flips this.
+    pub nova_use_protected_write: bool,
 }
 
 impl Default for ChatbotConfig {
@@ -138,6 +147,8 @@ impl Default for ChatbotConfig {
             dual_lane_enabled: true,
             quick_lane_model: None,
             cognitive_daily_token_budget: 500_000,
+            guardian_client: None,
+            nova_use_protected_write: false,
         }
     }
 }
