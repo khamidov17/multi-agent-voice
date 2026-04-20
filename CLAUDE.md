@@ -4,12 +4,23 @@
 
 A new Rust crate lives at [`bootstrap-guardian/`](bootstrap-guardian/). It is the write-guarding process that will prevent Nova from modifying its own harness, wrapper, or launch config when Nova gets woken up to autonomously ship code.
 
-**Status right now:** the guardian binary + its tests + its break-glass CLI + deploy templates + bootstrap/uninstall scripts are built and compile. What is NOT yet shipped:
+**Status right now (this branch):** slices 1 + 2 + 3 have shipped. Slices 4 + 5 are pending.
 
-- Nova's Claude Code tool string still includes `Edit, Write` (see Tier 1 section below). The guardian runs alongside the harness but Nova still writes files directly. This is a KNOWN STATE — the next Phase 0 slice removes `Edit, Write` and adds a harness-side MCP `protected_write` tool that routes through the guardian. Until then, the guardian validates the architecture in isolation; it does not yet enforce the invariant end-to-end.
-- Journal extensions (`claude.start`, `claude.end`, `tg.send`, `guardian.*` entry types via a dedicated writer task) have not been wired into `src/chatbot/journal.rs` yet.
-- Log rotation in `src/main.rs:501` is still the original `tracing_appender::non_blocking` call without size caps / retention sweeper.
-- 48-hour feature-flag + shadow-mode cutover for Edit/Write → protected_write is designed but unimplemented.
+Shipped (in this branch):
+- Guardian binary + its tests + break-glass CLI with pause/resume/status/**override-once**
+- Harness-side `src/guardian_client.rs` library — signs + sends HMAC-authenticated writes to the guardian, returns typed `WriteResult` with `Ok` / `Denied` / `Err` variants
+- New config fields `guardian_enabled`, `guardian_socket_path`, `guardian_key_path`, `nova_use_protected_write` (shadow-mode flag, default false)
+- **Daily log rotation** via `tracing_appender::rolling::daily` + retention sweeper task that deletes `claudir.log.*` files older than 7 days once per hour. Known limitation: size cap not enforced (needs `file-rotate` crate or custom `MakeWriter` — pending)
+- Deploy templates for launchd (macOS) + systemd (Linux), bootstrap + uninstall scripts, pre-commit hook blocking credential-shaped files
+
+What is NOT yet shipped:
+
+- **Nova's Claude Code tool string still includes `Edit, Write`** (see Tier 1 section below). The guardian and its client library both exist and work, but Nova is not yet routed through `protected_write` because removing `Edit, Write` is behaviorally breaking and requires a Nova `SYSTEM.md` prompt audit that is NOT an AI-safe task.
+- MCP `protected_write` tool wiring in `src/chatbot/tool_dispatch/` and `src/chatbot/tools.rs` — the `GuardianClient` is ready but the MCP surface has not been extended. Tracked in TODOS.md.
+- 48-hour feature-flag + shadow-mode dual-dispatch logic (the config flag exists; the dual-path code does not).
+- Journal extensions (`claude.start`, `claude.end`, `tg.send`, `guardian.*` entry types via a dedicated writer task) — requires refactoring the shared `Mutex<Connection>` in `journal.rs` to avoid hot-path contention (HC2 from the Eng review).
+- Log rotation **size caps** (100MB) — interim daily rotation is strictly better than the pre-Phase-0 state but still not the full rotation policy the design doc called for.
+- Main-crate integration tests at `tests/phase0_*.rs` — the `bootstrap-guardian` crate has its own full test suite (28 passing), but the main crate's end-to-end `protected_write` flow has no integration tests yet (pending MCP tool wiring).
 
 **What you can do with the guardian today:** run `cargo test -p bootstrap-guardian` to verify the full decision matrix (Allow / DenyProtected / DenyOutsideAllowed / PathTraversal / BadHmac / ReplayDetected / UidMismatch / Paused / Malformed / Ping). Run `./scripts/bootstrap-phase0.sh` to install the launchd plist or systemd unit. Run `guardianctl status` after the guardian is up.
 
