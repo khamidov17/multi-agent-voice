@@ -3,6 +3,7 @@ mod chatbot;
 mod classifier;
 mod config;
 mod dashboard;
+mod guardian_client;
 mod live_api;
 mod prefilter;
 mod telegram_log;
@@ -480,6 +481,54 @@ fn parse_args() -> (bool, String) {
     (wrapper_mode, config_path)
 }
 
+/// Delete `claudir.log.*` files in `log_dir` whose mtime is older than
+/// `max_age_days`. Best-effort: logs any per-file error but does not
+/// abort the sweep. Phase 0 log rotation.
+async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()> {
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(Duration::from_secs(max_age_days * 24 * 60 * 60))
+        .unwrap_or(std::time::UNIX_EPOCH);
+
+    let mut read_dir = tokio::fs::read_dir(log_dir).await?;
+    let mut deleted = 0usize;
+    while let Some(entry) = read_dir.next_entry().await? {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        // Match either `claudir.log` itself or `claudir.log.<suffix>` (daily stamp).
+        if !name.starts_with("claudir.log") {
+            continue;
+        }
+        let meta = match tokio::fs::metadata(&path).await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("log sweeper: stat {} failed: {}", path.display(), e);
+                continue;
+            }
+        };
+        let mtime = match meta.modified() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if mtime < cutoff {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                warn!("log sweeper: remove {} failed: {}", path.display(), e);
+            } else {
+                deleted += 1;
+            }
+        }
+    }
+    if deleted > 0 {
+        info!(
+            "log sweeper: removed {} files older than {} days",
+            deleted, max_age_days
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let (wrapper_mode, config_path) = parse_args();
@@ -491,15 +540,41 @@ async fn main() {
 
     let bot = Bot::new(&config.telegram_bot_token);
 
-    // Setup logging
+    // Setup logging — Phase 0 log rotation.
+    //
+    // Uses `tracing_appender::rolling::daily` to rotate log files at UTC
+    // midnight. The rotating writer auto-creates the target directory
+    // and appends to `claudir.log.YYYY-MM-DD`.
+    //
+    // Known limitation (tracked in TODOS.md): this rotates on TIME only,
+    // not on size. A 100 MB intra-day burst will still produce a single
+    // large file until midnight. The Eng review flagged this (TG1) and
+    // called for either the `file-rotate` crate or a custom `MakeWriter`
+    // with size caps. Until that lands, daily + 7-day retention is the
+    // interim shape; it's strictly better than the pre-Phase-0 state
+    // (one unrotated log forever).
+    //
+    // Retention: a background task deletes claudir.log.* files older
+    // than 7 days once per hour.
     let log_dir = config.data_dir.join("logs");
     std::fs::create_dir_all(&log_dir).ok();
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join("claudir.log"))
-        .expect("Failed to open log file");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(log_file);
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "claudir.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // Spawn the retention sweeper.
+    {
+        let sweep_dir = log_dir.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            interval.tick().await; // fires immediately; skip first tick so startup is quiet
+            loop {
+                interval.tick().await;
+                if let Err(e) = sweep_old_logs(&sweep_dir, 7).await {
+                    tracing::warn!("log retention sweeper: {}", e);
+                }
+            }
+        });
+    }
 
     let registry = tracing_subscriber::registry()
         .with(
