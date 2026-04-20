@@ -633,6 +633,25 @@ pub enum ToolCall {
     /// Signal that processing is complete.
     Done,
 
+    /// Phase 0 — Write a file via the bootstrap guardian.
+    ///
+    /// Used by Nova when `nova_use_protected_write` is true in the config.
+    /// The harness routes this through `guardian_client::GuardianClient` to
+    /// the guardian process, which enforces path canonicalization, allowed
+    /// roots, and protected-path denial. Nova cannot write to its own
+    /// harness/wrapper/config regardless of how this tool is called.
+    ProtectedWrite {
+        /// Absolute path to write. Guardian canonicalizes; must land inside
+        /// an allowed root and NOT inside a protected path.
+        path: String,
+        /// File content as a UTF-8 string. Arbitrary bytes are NOT supported
+        /// through this MCP surface — use Bash for binary writes to non-
+        /// protected paths.
+        content: String,
+        /// Why Nova is performing this write. Stored in the guardian audit log.
+        reason: String,
+    },
+
     /// Parse error - tool call couldn't be parsed. Error message will be sent back to model.
     #[serde(skip)]
     ParseError { message: String },
@@ -1595,6 +1614,28 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "properties": {}
             }),
         },
+        Tool {
+            name: "protected_write".to_string(),
+            description: "Phase 0 — write a file via the bootstrap guardian. Use this INSTEAD of the raw Edit/Write Claude Code tools when `nova_use_protected_write` is enabled. The guardian canonicalizes the path, verifies it lands inside an allowed root, and refuses any write to a protected path (the harness itself, launch configs, Cargo.toml). If denied, the response includes `alternative_roots` you may write to instead. Required only for Nova (Tier 1). Atlas/Sentinel should not call this — the harness rejects if the caller isn't full-permissions.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute filesystem path to create or overwrite. Example: /opt/nova/data/memories/note.md"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "File contents as a UTF-8 string."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Short free-form explanation of why you are writing this file. Stored in the guardian audit log — keep it specific so post-mortems are useful."
+                    }
+                },
+                "required": ["path", "content", "reason"]
+            }),
+        },
     ]
 }
 
@@ -1639,14 +1680,29 @@ mod tests {
         let tools = get_tool_definitions();
         // First tool is always send_message
         assert_eq!(tools[0].name, "send_message");
-        // Last tool is always done
-        assert_eq!(tools.last().unwrap().name, "done");
-        // Exact count — update this when adding/removing tools
+        // Phase 0 added protected_write AFTER done, so done is no longer the
+        // very last tool. Done is still required to be present and earlier
+        // in the list than protected_write.
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        let done_idx = names
+            .iter()
+            .position(|n| *n == "done")
+            .expect("done tool must exist");
+        let protected_write_idx = names
+            .iter()
+            .position(|n| *n == "protected_write")
+            .expect("protected_write tool must exist (Phase 0)");
+        assert!(
+            done_idx < protected_write_idx,
+            "done must appear before protected_write"
+        );
+        // Exact count — update this when adding/removing tools.
+        // Phase 0 added one tool: protected_write. Was 70 pre-Phase-0.
         assert_eq!(
             tools.len(),
-            70,
+            71,
             "Tool count changed — update this test. Tools: {:?}",
-            tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+            names
         );
     }
 
