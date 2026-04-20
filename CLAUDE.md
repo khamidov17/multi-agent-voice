@@ -4,23 +4,28 @@
 
 A new Rust crate lives at [`bootstrap-guardian/`](bootstrap-guardian/). It is the write-guarding process that will prevent Nova from modifying its own harness, wrapper, or launch config when Nova gets woken up to autonomously ship code.
 
-**Status right now (this branch):** slices 1 + 2 + 3 have shipped. Slices 4 + 5 are pending.
+**Status right now (this branch):** slices 1 + 2 + 3 + 4 + 5 have all shipped.
 
-Shipped (in this branch):
-- Guardian binary + its tests + break-glass CLI with pause/resume/status/**override-once**
-- Harness-side `src/guardian_client.rs` library — signs + sends HMAC-authenticated writes to the guardian, returns typed `WriteResult` with `Ok` / `Denied` / `Err` variants
-- New config fields `guardian_enabled`, `guardian_socket_path`, `guardian_key_path`, `nova_use_protected_write` (shadow-mode flag, default false)
-- **Daily log rotation** via `tracing_appender::rolling::daily` + retention sweeper task that deletes `claudir.log.*` files older than 7 days once per hour. Known limitation: size cap not enforced (needs `file-rotate` crate or custom `MakeWriter` — pending)
-- Deploy templates for launchd (macOS) + systemd (Linux), bootstrap + uninstall scripts, pre-commit hook blocking credential-shaped files
+Shipped:
+- Guardian binary + tests + break-glass CLI with pause/resume/status/**override-once**
+- Harness-side `src/guardian_client.rs` library (HMAC-SHA256 signed UDS client)
+- New config fields: `guardian_enabled`, `guardian_socket_path`, `guardian_key_path`, `nova_use_protected_write` (shadow-mode flag, default false)
+- **MCP `protected_write(path, content, reason)` tool** in `src/chatbot/tools.rs` + dispatch handler at `src/chatbot/tool_dispatch/protected_write.rs`. Gated on Tier-1 + guardian-available; returns structured JSON with err_code + human_message + suggested_action + alternative_roots so Nova can reason about denials.
+- **Nova's Claude Code tool string is now conditional.** When `nova_use_protected_write = true` AND `full_permissions = true`, CC spawns with `Bash,Read,WebSearch` (no Edit/Write). The runtime security check that rejects unexpected Claude-provided tools mirrors the new string. Flag default is `false` — Nova's behavior is unchanged until an operator flips it.
+- **Journal Phase 0 entry types**: `tool_call`, `tg.send`, `guardian.allow`, `guardian.deny`, `guardian.error`. Best-effort `emit()` helper that logs failures via `tracing::warn!` instead of bubbling up.
+- **Tool-call journal events** emitted from `tool_dispatch/mod.rs` after every tool invocation (variant name + success/error + redacted preview + bot_name tag).
+- **Guardian journal events** (`guardian.allow` / `guardian.deny` / `guardian.error`) emitted from the `protected_write` dispatch.
+- **Log rotation** — daily via `tracing-appender::rolling::daily`, 7-day retention sweeper, **100 MiB size cap** enforced by the sweeper renaming oversized files (`.oversized-<unix_ts>`) so tracing-appender reopens the target on the next write.
+- Deploy templates for launchd (macOS) + systemd (Linux), bootstrap + uninstall scripts, pre-commit hook blocking credential-shaped files.
+- Full `docs/bootstrap-guardian.md` + `bootstrap-guardian/README.md` architecture write-ups.
 
-What is NOT yet shipped:
+What is still deferred (tracked in TODOS.md):
 
-- **Nova's Claude Code tool string still includes `Edit, Write`** (see Tier 1 section below). The guardian and its client library both exist and work, but Nova is not yet routed through `protected_write` because removing `Edit, Write` is behaviorally breaking and requires a Nova `SYSTEM.md` prompt audit that is NOT an AI-safe task.
-- MCP `protected_write` tool wiring in `src/chatbot/tool_dispatch/` and `src/chatbot/tools.rs` — the `GuardianClient` is ready but the MCP surface has not been extended. Tracked in TODOS.md.
-- 48-hour feature-flag + shadow-mode dual-dispatch logic (the config flag exists; the dual-path code does not).
-- Journal extensions (`claude.start`, `claude.end`, `tg.send`, `guardian.*` entry types via a dedicated writer task) — requires refactoring the shared `Mutex<Connection>` in `journal.rs` to avoid hot-path contention (HC2 from the Eng review).
-- Log rotation **size caps** (100MB) — interim daily rotation is strictly better than the pre-Phase-0 state but still not the full rotation policy the design doc called for.
-- Main-crate integration tests at `tests/phase0_*.rs` — the `bootstrap-guardian` crate has its own full test suite (28 passing), but the main crate's end-to-end `protected_write` flow has no integration tests yet (pending MCP tool wiring).
+- **Dedicated journal writer task** (HC2 from Eng review). Current Phase 0 emits journal events from the dispatch layer, sidestepping the shared `Mutex<Connection>` contention for Phase 0 events. The engine's own `compress_old_entries` / `search_journal` still share the same mutex with the hot path — refactoring to an mpsc-fed writer task is its own focused change.
+- **Telegram `MessageSender` trait + separate `tg.send` events.** Current coverage via `tool_call` entries captures which sends happened and whether they succeeded; splitting out HTTP-status-level events from the specific `bot.send_message` callsites was deferred.
+- **Main-crate integration tests at `tests/phase0_*.rs`** — the `bootstrap-guardian` crate has 28 passing tests end-to-end; the main crate's guardian_client + dispatch flow is covered by 4 unit tests but no live end-to-end integration harness yet.
+- **`observability-wishlist.txt`** — the human owner's assignment (tail bots, break things, produce the wishlist). Not an AI task.
+- Live server-side smoke test: `./scripts/bootstrap-phase0.sh` on the deploy box, `guardianctl status`, flip `nova_use_protected_write = true` in `nova.json`, watch Nova use `protected_write` instead of Edit/Write.
 
 **What you can do with the guardian today:** run `cargo test -p bootstrap-guardian` to verify the full decision matrix (Allow / DenyProtected / DenyOutsideAllowed / PathTraversal / BadHmac / ReplayDetected / UidMismatch / Paused / Malformed / Ping). Run `./scripts/bootstrap-phase0.sh` to install the launchd plist or systemd unit. Run `guardianctl status` after the guardian is up.
 
