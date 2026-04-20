@@ -15,9 +15,9 @@
 use anyhow::{Context, Result, anyhow};
 use bootstrap_guardian::GuardianConfig;
 use clap::{Parser, Subcommand};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
@@ -47,12 +47,20 @@ enum Cmd {
     Resume,
     /// Report whether the guardian is reachable and what it thinks.
     Status,
-    /// Not implemented in this slice — planned for Phase 0 follow-up PR.
+    /// Owner break-glass: one-shot write that bypasses the protected-path
+    /// denial. Signs with the SEPARATE override key (not guardian.key), so
+    /// the harness cannot forge one even if compromised. `--reason` is
+    /// mandatory and captured in the audit log.
     OverrideOnce {
+        /// Absolute path to (over)write.
         #[arg(long)]
         path: String,
+        /// Free-form justification. Audit-logged.
         #[arg(long)]
         reason: String,
+        /// Bytes to write. If omitted, reads stdin until EOF.
+        #[arg(long)]
+        content: Option<String>,
     },
 }
 
@@ -65,13 +73,11 @@ fn main() -> Result<()> {
         Cmd::Pause { duration, reason } => pause(&cfg, &duration, &reason),
         Cmd::Resume => resume(&cfg),
         Cmd::Status => status(&cfg),
-        Cmd::OverrideOnce { path: _, reason: _ } => {
-            anyhow::bail!(
-                "override-once is intentionally unimplemented in this slice. \
-                 Tracked in TODOS.md. For an emergency bypass right now, \
-                 invoke the write manually as the owner UID (outside the guardian)."
-            )
-        }
+        Cmd::OverrideOnce {
+            path,
+            reason,
+            content,
+        } => override_once(&cfg, &path, &reason, content.as_deref()),
     }
 }
 
@@ -169,6 +175,118 @@ fn status(cfg: &GuardianConfig) -> Result<()> {
         println!("pause flag: absent");
     }
     Ok(())
+}
+
+/// Owner-only break-glass: send a signed `OverrideWrite` request to the
+/// guardian using the separate `override.key`. The harness does NOT have
+/// this key, so a compromised harness cannot mint an override — only the
+/// human owner, running this CLI with read access to `override.key`, can.
+///
+/// The guardian still enforces:
+///   - `allowed_uids` (peer UID must be registered)
+///   - nonce replay (monotonic, persisted)
+///   - path canonicalize + `O_NOFOLLOW`
+///   - "outside allowed root" rejection (override can't escape the allowlist)
+///
+/// What it DOES bypass is `protected_paths` — exactly and only that.
+fn override_once(
+    cfg: &GuardianConfig,
+    path: &str,
+    reason: &str,
+    content: Option<&str>,
+) -> Result<()> {
+    if reason.trim().is_empty() {
+        return Err(anyhow!(
+            "override-once requires a non-empty --reason (audit-logged)"
+        ));
+    }
+    if !Path::new(path).is_absolute() {
+        return Err(anyhow!(
+            "override-once requires an absolute --path, got {:?}",
+            path
+        ));
+    }
+
+    // Locate the override key. Config may set `override_key_path` explicitly;
+    // otherwise fall back to `<run_dir>/override.key` — but this is only a
+    // client-side convenience; if the guardian itself has no configured path
+    // it will reject with OverrideDisabled regardless.
+    let override_key_path = cfg
+        .override_key_path
+        .clone()
+        .unwrap_or_else(|| cfg.default_override_key_path());
+
+    let key = bootstrap_guardian::auth::load_key(&override_key_path).with_context(|| {
+        format!(
+            "reading override key at {} (must be mode 0400, >=32 bytes)",
+            override_key_path.display()
+        )
+    })?;
+
+    // Bytes to write: from --content flag, or slurp stdin if no flag given.
+    let bytes: Vec<u8> = match content {
+        Some(s) => s.as_bytes().to_vec(),
+        None => {
+            let mut buf = Vec::new();
+            std::io::stdin()
+                .read_to_end(&mut buf)
+                .context("reading override payload from stdin")?;
+            buf
+        }
+    };
+
+    let sock = cfg.socket_path();
+    let mut stream =
+        UnixStream::connect(&sock).with_context(|| format!("connect {}", sock.display()))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+    let nonce = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+    let hmac = bootstrap_guardian::auth::compute_hmac(
+        &key,
+        bootstrap_guardian::Op::OverrideWrite,
+        path,
+        &bytes,
+        nonce,
+    );
+    let bytes_b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    let req = bootstrap_guardian::Req {
+        op: bootstrap_guardian::Op::OverrideWrite,
+        path: path.to_string(),
+        bytes_b64,
+        nonce,
+        hmac,
+        reason: Some(reason.to_string()),
+    };
+
+    let line = serde_json::to_string(&req)? + "\n";
+    stream.write_all(line.as_bytes())?;
+    stream.flush()?;
+
+    let mut resp_line = String::new();
+    BufReader::new(&stream)
+        .read_line(&mut resp_line)
+        .context("read override-once response")?;
+    let resp: bootstrap_guardian::Resp =
+        serde_json::from_str(resp_line.trim_end()).context("parse override-once response")?;
+
+    if resp.ok {
+        println!(
+            "override-once: OK — wrote {} bytes to {}",
+            resp.written_bytes.unwrap_or(0),
+            path
+        );
+        Ok(())
+    } else {
+        println!(
+            "override-once: FAIL (code: {:?}, message: {:?})",
+            resp.err_code, resp.message
+        );
+        if let Some(sa) = &resp.suggested_action {
+            println!("  suggested: {}", sa);
+        }
+        Err(anyhow!("override-once rejected by guardian"))
+    }
 }
 
 fn parse_duration(s: &str) -> Result<Duration> {

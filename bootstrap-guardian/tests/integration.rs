@@ -46,6 +46,9 @@ fn setup() -> (tempfile::TempDir, GuardianConfig, Vec<u8>) {
         allowed_roots: vec![allowed],
         allowed_uids: vec![unsafe { libc::geteuid() }],
         request_timeout_secs: 5,
+        // Override-once is OFF by default; individual tests opt in by setting
+        // `cfg.override_key_path = Some(...)` before starting the guardian.
+        override_key_path: None,
     };
 
     (td, cfg, key_bytes)
@@ -319,4 +322,140 @@ fn too_short_key_is_rejected() {
     std::fs::set_permissions(&key_path, perms).unwrap();
     let err = load_key(&key_path).unwrap_err();
     assert!(err.to_string().contains("32"), "{}", err);
+}
+
+/// Install a separate override.key in `run_dir` at 0400 with deterministic
+/// bytes and return it. The override key MUST be distinct from the guardian
+/// key so the test proves the server picks the right one per-op.
+fn install_override_key(run_dir: &Path) -> Vec<u8> {
+    let override_key: Vec<u8> = (100..164).collect(); // different from guardian key
+    let path = run_dir.join("override.key");
+    std::fs::write(&path, &override_key).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o400);
+    std::fs::set_permissions(&path, perms).unwrap();
+    override_key
+}
+
+fn signed_override_req(key: &[u8], path: &Path, bytes: &[u8], nonce: u64, reason: &str) -> Req {
+    use base64::Engine;
+    let path_s = path.display().to_string();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let hmac = compute_hmac(key, Op::OverrideWrite, &path_s, bytes, nonce);
+    Req {
+        op: Op::OverrideWrite,
+        path: path_s,
+        bytes_b64: b64,
+        nonce,
+        hmac,
+        reason: Some(reason.into()),
+    }
+}
+
+#[test]
+#[serial]
+fn override_once_write_to_protected_path() {
+    let (td, mut cfg, key) = setup();
+    // Enable override on the guardian by pointing it at a real override key.
+    let override_key = install_override_key(&cfg.run_dir);
+    cfg.override_key_path = Some(cfg.run_dir.join("override.key"));
+
+    let sock = start_guardian(cfg.clone(), key.clone());
+
+    // The write targets a PROTECTED path — a normal Write would be denied.
+    let target = cfg.protected_paths[0].join("main.rs");
+
+    // First prove a regular write is still denied (baseline sanity).
+    let regular = signed_write_req(&key, &target, b"forged", 10, "normal write attempt");
+    let resp = rpc(&sock, &regular);
+    assert!(
+        !resp.ok,
+        "baseline: regular write to protected must be denied"
+    );
+    assert_eq!(resp.err_code, Some(ErrCode::Denied));
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "old",
+        "baseline: file must be untouched"
+    );
+
+    // Now the override-once path — same target, signed with the OVERRIDE key.
+    let req = signed_override_req(&override_key, &target, b"NEW", 11, "emergency bypass");
+    let resp = rpc(&sock, &req);
+    assert!(
+        resp.ok,
+        "override-once must succeed on protected path: {:?}",
+        resp
+    );
+    assert_eq!(resp.written_bytes, Some(3));
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "NEW",
+        "override must have replaced protected file contents"
+    );
+
+    // Override cannot escape the allowlist: a path outside BOTH the allowed
+    // root AND the protected path must still be rejected.
+    let outside_td = tempfile::tempdir().unwrap();
+    let outside = outside_td.path().canonicalize().unwrap().join("x.txt");
+    let escape = signed_override_req(&override_key, &outside, b"pwn", 12, "try to escape");
+    let resp = rpc(&sock, &escape);
+    assert!(
+        !resp.ok,
+        "override must still respect DenyOutsideAllowed: {:?}",
+        resp
+    );
+    assert_eq!(resp.err_code, Some(ErrCode::Denied));
+
+    // The audit log should contain at least one `override_allow` decision
+    // so post-mortem reviewers can find the bypass.
+    let audit = std::fs::read_to_string(cfg.audit_log_path())
+        .expect("audit log exists after override_allow");
+    assert!(
+        audit.contains("override_allow"),
+        "audit log missing override_allow decision; got:\n{}",
+        audit
+    );
+    assert!(
+        audit.contains("emergency bypass"),
+        "audit log should capture the reason; got:\n{}",
+        audit
+    );
+    drop(td);
+}
+
+#[test]
+#[serial]
+fn override_once_rejected_without_key() {
+    // Guardian has NO override_key_path configured → override-once must be
+    // rejected with OverrideDisabled even if the client has a valid-looking
+    // HMAC. Also verifies the protected file is untouched.
+    let (td, cfg, key) = setup();
+    assert!(
+        cfg.override_key_path.is_none(),
+        "precondition: test setup leaves override disabled"
+    );
+    let sock = start_guardian(cfg.clone(), key.clone());
+
+    let target = cfg.protected_paths[0].join("main.rs");
+
+    // Sign with *some* key — doesn't matter, server should reject before
+    // HMAC verification even runs.
+    let fake_override_key: Vec<u8> = (0..64).map(|i| i ^ 0xAA).collect();
+    let req = signed_override_req(&fake_override_key, &target, b"pwn", 20, "no key configured");
+    let resp = rpc(&sock, &req);
+    assert!(!resp.ok);
+    assert_eq!(
+        resp.err_code,
+        Some(ErrCode::OverrideDisabled),
+        "expected OverrideDisabled, got {:?}",
+        resp
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "old",
+        "protected file must remain unmodified when override is disabled"
+    );
+    drop(td);
 }
