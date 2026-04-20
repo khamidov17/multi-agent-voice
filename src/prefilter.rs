@@ -79,6 +79,10 @@ mod tests {
             dual_lane_enabled: false,
             quick_lane_model: None,
             cognitive_token_budget: 500_000,
+            guardian_enabled: false,
+            guardian_socket_path: None,
+            guardian_key_path: None,
+            nova_use_protected_write: false,
         }
     }
 

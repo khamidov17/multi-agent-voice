@@ -93,6 +93,34 @@ struct ConfigFile {
     /// Daily token budget for cognitive loop (default 500000).
     #[serde(default = "default_cognitive_token_budget")]
     cognitive_token_budget: u64,
+
+    // ---- Phase 0: Bootstrap guardian integration ----
+    // When `guardian_enabled` is true and guardian_socket_path + guardian_key_path
+    // both resolve to existing files, the harness constructs a `GuardianClient`
+    // at startup and wires it into the MCP tool dispatch. If any of those are
+    // missing, the harness still runs (guardian is opt-in) but the MCP
+    // `protected_write` tool will return an error if Nova attempts to use it.
+    #[serde(default)]
+    guardian_enabled: bool,
+    /// Absolute path to the guardian's UDS socket.
+    /// Defaults to `/opt/claudir/run/bootstrap-guardian.sock` in prod-like
+    /// environments; set explicitly for dev.
+    #[serde(default)]
+    guardian_socket_path: Option<String>,
+    /// Absolute path to the guardian's shared HMAC key (mode 0400, >=32 bytes).
+    /// When None, the harness cannot sign requests and `protected_write`
+    /// is disabled.
+    #[serde(default)]
+    guardian_key_path: Option<String>,
+    /// When true AND guardian_enabled is true, Nova's Claude Code tool
+    /// string drops `Edit` and `Write` in favor of the MCP `protected_write`
+    /// tool. When false (default), Nova keeps Edit/Write — this is the
+    /// shadow-mode flag for the 48h cutover period.
+    ///
+    /// Not yet wired to Nova's CC spawn args — tool-string removal is the
+    /// next Phase 0 slice.
+    #[serde(default)]
+    nova_use_protected_write: bool,
 }
 
 fn default_cognitive_token_budget() -> u64 {
@@ -171,6 +199,22 @@ pub struct Config {
     pub quick_lane_model: Option<String>,
     /// Daily token budget for cognitive loop.
     pub cognitive_token_budget: u64,
+
+    // ---- Phase 0: Bootstrap guardian integration ----
+    /// Whether to try to attach a `GuardianClient` at startup. When true
+    /// AND socket/key paths are valid, the client is constructed and
+    /// exposed for the MCP `protected_write` tool. When false, the MCP
+    /// tool is unregistered and `Nova.tool_list` is unchanged.
+    pub guardian_enabled: bool,
+    /// Absolute path to the guardian's UDS socket. None → unconfigured.
+    pub guardian_socket_path: Option<PathBuf>,
+    /// Absolute path to the guardian's HMAC key. None → unconfigured.
+    pub guardian_key_path: Option<PathBuf>,
+    /// When true, Nova's Claude Code tool string drops Edit/Write in favor
+    /// of `protected_write`. Implemented separately from guardian_enabled
+    /// so Phase 0 can ship the guardian first with Nova unchanged, then
+    /// flip this to true in a follow-up PR. Shadow-mode cutover knob.
+    pub nova_use_protected_write: bool,
 }
 
 impl Config {
@@ -252,6 +296,10 @@ impl Config {
             dual_lane_enabled: file.dual_lane_enabled,
             quick_lane_model: file.quick_lane_model,
             cognitive_token_budget: file.cognitive_token_budget,
+            guardian_enabled: file.guardian_enabled,
+            guardian_socket_path: file.guardian_socket_path.map(PathBuf::from),
+            guardian_key_path: file.guardian_key_path.map(PathBuf::from),
+            nova_use_protected_write: file.nova_use_protected_write,
         }
     }
 
