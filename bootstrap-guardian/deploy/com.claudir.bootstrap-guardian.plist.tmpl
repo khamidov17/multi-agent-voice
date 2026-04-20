@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.claudir.bootstrap-guardian</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>CLAUDIR_GUARDIAN_BIN</string>
+      <string>--config</string>
+      <string>CLAUDIR_GUARDIAN_CONFIG</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>CLAUDIR_ENV</key>
+      <string>dev</string>
+      <key>RUST_LOG</key>
+      <string>info,bootstrap_guardian=info</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>StandardOutPath</key>
+    <string>CLAUDIR_RUN_DIR/bootstrap-guardian.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>CLAUDIR_RUN_DIR/bootstrap-guardian.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>CLAUDIR_RUN_DIR</string>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+      <key>NumberOfFiles</key>
+      <integer>1024</integer>
+    </dict>
+  </dict>
+</plist>

@@ -1,0 +1,40 @@
+[package]
+name = "bootstrap-guardian"
+version = "0.1.0"
+edition = "2024"
+description = "Write-guarding process for Claudir: prevents Nova from modifying its own harness/wrapper/config at 3am"
+license = "MIT"
+
+[features]
+default = []
+# Enables bind/connect to real /opt/claudir/run/ paths. Tests omit this.
+prod_paths = []
+
+[[bin]]
+name = "bootstrap-guardian"
+path = "src/main.rs"
+
+[[bin]]
+name = "guardianctl"
+path = "src/bin/guardianctl.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+libc = "0.2"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+serial_test = "3"
