@@ -1,0 +1,31 @@
+[Unit]
+Description=Claudir Bootstrap Guardian — write-guarding process
+Documentation=file:///opt/claudir/docs/bootstrap-guardian.md
+After=network.target
+Before=ava-atlas.service ava-nova.service ava-security.service
+
+[Service]
+Type=simple
+User=CLAUDIR_GUARDIAN_USER
+Group=CLAUDIR_GUARDIAN_GROUP
+WorkingDirectory=CLAUDIR_RUN_DIR
+ExecStart=CLAUDIR_GUARDIAN_BIN --config CLAUDIR_GUARDIAN_CONFIG
+Environment=CLAUDIR_ENV=prod
+Environment=RUST_LOG=info,bootstrap_guardian=info
+Restart=always
+RestartSec=5
+
+# Privacy hardening — guardian only needs read of the key + write to run_dir
+# + write to protected roots. Narrow its view of the world.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=CLAUDIR_RUN_DIR CLAUDIR_ALLOWED_ROOTS
+NoNewPrivileges=true
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bootstrap-guardian
+
+[Install]
+WantedBy=multi-user.target

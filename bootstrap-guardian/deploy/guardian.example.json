@@ -1,0 +1,45 @@
+{
+  "dev": {
+    "run_dir": "/Users/ava/claudir-dev/run",
+    "protected_paths": [
+      "/Users/ava/claudir-dev/src",
+      "/Users/ava/claudir-dev/supervisor",
+      "/Users/ava/claudir-dev/Cargo.toml",
+      "/Users/ava/claudir-dev/Cargo.lock",
+      "/Users/ava/claudir-dev/atlas.json",
+      "/Users/ava/claudir-dev/nova.json",
+      "/Users/ava/claudir-dev/sentinel.json"
+    ],
+    "allowed_roots": [
+      "/Users/ava/claudir-dev/data",
+      "/Users/ava/claudir-dev/logs",
+      "/tmp/claudir-scratch"
+    ],
+    "allowed_uids": [501],
+    "request_timeout_secs": 5
+  },
+  "prod": {
+    "run_dir": "/opt/claudir/run",
+    "protected_paths": [
+      "/opt/nova/src",
+      "/opt/nova/supervisor",
+      "/opt/nova/target",
+      "/opt/nova/Cargo.toml",
+      "/opt/nova/Cargo.lock",
+      "/opt/nova/atlas.json",
+      "/opt/nova/nova.json",
+      "/opt/nova/sentinel.json",
+      "/etc/systemd/system/ava-atlas.service",
+      "/etc/systemd/system/ava-nova.service",
+      "/etc/systemd/system/ava-security.service",
+      "/etc/systemd/system/bootstrap-guardian.service"
+    ],
+    "allowed_roots": [
+      "/opt/nova/data",
+      "/opt/nova/logs",
+      "/tmp/claudir-scratch"
+    ],
+    "allowed_uids": [1000],
+    "request_timeout_secs": 5
+  }
+}
