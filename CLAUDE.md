@@ -1,5 +1,29 @@
 # Claudir — Three-Tier Telegram Bot Architecture
 
+## Phase 0 — Bootstrap Guardian (in progress)
+
+A new Rust crate lives at [`bootstrap-guardian/`](bootstrap-guardian/). It is the write-guarding process that will prevent Nova from modifying its own harness, wrapper, or launch config when Nova gets woken up to autonomously ship code.
+
+**Status right now:** the guardian binary + its tests + its break-glass CLI + deploy templates + bootstrap/uninstall scripts are built and compile. What is NOT yet shipped:
+
+- Nova's Claude Code tool string still includes `Edit, Write` (see Tier 1 section below). The guardian runs alongside the harness but Nova still writes files directly. This is a KNOWN STATE — the next Phase 0 slice removes `Edit, Write` and adds a harness-side MCP `protected_write` tool that routes through the guardian. Until then, the guardian validates the architecture in isolation; it does not yet enforce the invariant end-to-end.
+- Journal extensions (`claude.start`, `claude.end`, `tg.send`, `guardian.*` entry types via a dedicated writer task) have not been wired into `src/chatbot/journal.rs` yet.
+- Log rotation in `src/main.rs:501` is still the original `tracing_appender::non_blocking` call without size caps / retention sweeper.
+- 48-hour feature-flag + shadow-mode cutover for Edit/Write → protected_write is designed but unimplemented.
+
+**What you can do with the guardian today:** run `cargo test -p bootstrap-guardian` to verify the full decision matrix (Allow / DenyProtected / DenyOutsideAllowed / PathTraversal / BadHmac / ReplayDetected / UidMismatch / Paused / Malformed / Ping). Run `./scripts/bootstrap-phase0.sh` to install the launchd plist or systemd unit. Run `guardianctl status` after the guardian is up.
+
+**Full architecture + operations:** [`docs/bootstrap-guardian.md`](docs/bootstrap-guardian.md). Full design-doc chain: `~/.gstack/projects/ava/ava-claudir-main-design-20260421-003433.md`.
+
+**Roadmap from here:**
+
+| Slice | What ships | Nova behavior |
+|---|---|---|
+| Slice 1 (shipped this branch) | guardian binary, guardianctl, tests, scripts, docs | unchanged — Nova still has Edit/Write |
+| Slice 2 (next) | Remove Edit/Write from Nova's CC spawn args. Add MCP `protected_write` tool in the harness. Feature flag + 48h shadow mode. | Nova writes via MCP tool → guardian enforces |
+| Slice 3 | Journal extensions + log rotation + Telegram delivery events | Observability closes the delta |
+| Graduation gate | 7 clean overnight runs with log-sufficient post-mortems | Phase 1 (alerting) unlocks |
+
 ## Overview
 
 Three bots, three trust levels, one Rust binary (`claudir`). Owner controls via Telegram.
