@@ -8,6 +8,7 @@ pub mod cognitive;
 pub mod context;
 pub mod database;
 pub mod debounce;
+pub mod detectors;
 pub mod document;
 pub mod dual_lane;
 pub mod engine;
