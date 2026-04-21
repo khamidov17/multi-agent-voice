@@ -702,11 +702,15 @@ impl ChatbotEngine {
         // Quick lane uses WebSearch only — no code execution, no memory writes.
         let quick_tools = Some("WebSearch".to_string());
 
-        let quick_claude = match ClaudeCode::start(
+        // Quick lane is always Tier-2 (WebSearch only), so use_protected_write
+        // has no effect here — but we call start_with_guardian for API
+        // consistency so the old ::start wrapper can be removed.
+        let quick_claude = match ClaudeCode::start_with_guardian(
             quick_prompt,
             None,  // No session persistence — stateless quick responses
             false, // Never full_permissions
             quick_tools,
+            false, // No protected_write in quick lane
         ) {
             Ok(cc) => Arc::new(Mutex::new(cc)),
             Err(e) => {

@@ -93,7 +93,14 @@ pub fn add_entry(
     participants: &[String],
     tags: &[String],
 ) -> anyhow::Result<i64> {
-    let conn = conn.lock().unwrap();
+    // UTF-8 safe: iterate chars (not bytes) so a multi-byte codepoint at
+    // position 500 doesn't panic. Previously used `&detail[..detail.len().min(500)]`
+    // which slices at an arbitrary byte offset — /review performance specialist
+    // flagged this as a hot-path panic waiting to happen on Cyrillic/emoji input.
+    let detail_capped: String = detail.chars().take(500).collect();
+    let conn = conn
+        .lock()
+        .map_err(|e| anyhow::anyhow!("journal mutex poisoned: {}", e))?;
     conn.execute(
         "INSERT INTO journal (task_id, entry_type, summary, detail, participants, tags)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -101,7 +108,7 @@ pub fn add_entry(
             task_id,
             entry_type,
             summary,
-            &detail[..detail.len().min(500)], // cap at 500 chars
+            &detail_capped,
             serde_json::to_string(participants)?,
             serde_json::to_string(tags)?,
         ],

@@ -193,8 +193,11 @@ struct WorkerConfig {
     full_permissions: bool,
     tools_override: Option<String>,
     /// Phase 0 shadow-mode flag. When true AND `full_permissions` is true,
-    /// Nova's Claude Code spawns with `Bash,Read,WebSearch` (no Edit/Write);
-    /// the AI is expected to call the MCP `protected_write` tool instead.
+    /// Nova's Claude Code spawns with `Read,WebSearch` only (no Bash, Edit,
+    /// or Write). The MCP `protected_write` tool becomes the only way to
+    /// write files. Bash is deliberately dropped — with Bash available Nova
+    /// could read guardian.key off disk (0400 owned by harness UID = Bash
+    /// UID) and mint its own HMAC, bypassing the guardian entirely.
     use_protected_write: bool,
 }
 
@@ -203,25 +206,17 @@ impl ClaudeCode {
     /// If session_file exists, resume that session. Otherwise start fresh with system_prompt.
     /// `full_permissions` — Tier 1 gets Bash,Edit,Write,Read,WebSearch; Tier 2 gets WebSearch only.
     /// `tools_override` — if set, overrides the full_permissions-based tool selection.
-    pub fn start(
-        system_prompt: String,
-        session_file: Option<PathBuf>,
-        full_permissions: bool,
-        tools_override: Option<String>,
-    ) -> Result<Self, String> {
-        Self::start_with_guardian(
-            system_prompt,
-            session_file,
-            full_permissions,
-            tools_override,
-            false,
-        )
-    }
-
-    /// Phase 0: start Claude Code with explicit control over whether Nova's
-    /// tool string drops `Edit, Write` in favor of the MCP `protected_write`
-    /// shim. Call this from `ChatbotEngine::new` when `nova_use_protected_write`
-    /// is true AND `full_permissions` is true.
+    /// Start Claude Code, optionally resuming a previous session.
+    ///
+    /// - `full_permissions` — Tier 1 gets Bash,Edit,Write,Read,WebSearch; Tier 2 gets WebSearch only.
+    /// - `tools_override` — if set, overrides the full_permissions-based tool selection.
+    /// - `use_protected_write` — Phase 0 shadow-mode flag. When true AND `full_permissions`
+    ///   is true, Nova's Claude Code spawns WITHOUT Bash/Edit/Write (only `Read,WebSearch`);
+    ///   the AI is expected to use the MCP `protected_write` tool for file writes, which
+    ///   routes through the bootstrap guardian. Dropping Bash is deliberate: Bash can
+    ///   `cat > /opt/nova/src/main.rs` directly, bypassing the guardian. Without Bash,
+    ///   the MCP tool is the only write path, so the guardian's allowlist/blocklist is
+    ///   actually enforced.
     pub fn start_with_guardian(
         system_prompt: String,
         session_file: Option<PathBuf>,
@@ -923,27 +918,18 @@ fn setup_claude_process(
             Some(OutputMessage::System(sys))
                 if sys.subtype.is_none() || sys.subtype.as_deref() == Some("init") =>
             {
-                // Build the allowed tools list based on config — MUST mirror
-                // the `--tools` string built in spawn_process_with_guardian()
-                // exactly, otherwise the SECURITY check below false-positives
-                // or false-negatives.
+                // Build the allowed tools list from the single source of
+                // truth — compute_allowed_tools. Previously this logic was
+                // duplicated ("MUST mirror ... exactly"), a known bug magnet
+                // called out by the /review maintainability specialist.
+                let allowed_tools_str =
+                    compute_allowed_tools(full_permissions, use_protected_write, tools_override);
                 let mut allowed_set: Vec<&str> = vec!["StructuredOutput"];
-                if let Some(ov) = tools_override {
-                    // Custom tools: parse comma-separated list
-                    for tool in ov.split(',') {
-                        let t = tool.trim();
-                        if !t.is_empty() && !allowed_set.contains(&t) {
-                            allowed_set.push(Box::leak(t.to_string().into_boxed_str()));
-                        }
+                for tool in allowed_tools_str.split(',') {
+                    let t = tool.trim();
+                    if !t.is_empty() && !allowed_set.contains(&t) {
+                        allowed_set.push(Box::leak(t.to_string().into_boxed_str()));
                     }
-                } else if full_permissions && use_protected_write {
-                    // Phase 0 shadow-mode: Edit/Write dropped, writes routed
-                    // through MCP `protected_write` → bootstrap guardian.
-                    allowed_set.extend_from_slice(&["WebSearch", "Bash", "Read"]);
-                } else if full_permissions {
-                    allowed_set.extend_from_slice(&["WebSearch", "Bash", "Read", "Edit", "Write"]);
-                } else {
-                    allowed_set.push("WebSearch");
                 }
                 let unexpected: Vec<_> = sys
                     .tools
@@ -1213,30 +1199,41 @@ fn worker_loop(
     Ok(())
 }
 
-fn spawn_process(
-    system_prompt: &str,
-    resume_session: Option<&str>,
+/// Single source of truth for Claude Code's `--tools` arg AND the runtime
+/// `allowed_set` check that rejects unexpected tools. Review flagged the
+/// prior duplication ("MUST mirror" comment) as a bug magnet — this fn is
+/// the dedupe.
+///
+/// Tool matrix:
+/// - `tools_override`  → whatever the operator configured
+/// - Tier 2 (`full_permissions=false`) → `WebSearch` only
+/// - Tier 1 + `use_protected_write=true` → `Read, WebSearch`
+///   (**Bash + Edit + Write all dropped** so the MCP `protected_write` tool
+///   is the only write path. Dropping Bash closes the `cat > /opt/nova/src/...`
+///   bypass the /review security specialist flagged — with Bash available,
+///   Nova could mint its own HMAC from guardian.key and ignore the
+///   guardian entirely. No Bash ⇒ no shell-based bypass.)
+/// - Tier 1 (default) → `Bash, Edit, Write, Read, WebSearch`
+fn compute_allowed_tools(
     full_permissions: bool,
+    use_protected_write: bool,
     tools_override: &Option<String>,
-) -> Result<Child, String> {
-    spawn_process_with_guardian(
-        system_prompt,
-        resume_session,
-        full_permissions,
-        tools_override,
-        false,
-    )
+) -> String {
+    if let Some(ov) = tools_override {
+        return ov.clone();
+    }
+    if full_permissions && use_protected_write {
+        return "Read,WebSearch".to_string();
+    }
+    if full_permissions {
+        return "Bash,Edit,Write,Read,WebSearch".to_string();
+    }
+    "WebSearch".to_string()
 }
 
-/// Phase 0: variant of spawn_process that takes an additional
-/// `use_protected_write` flag. When true AND `full_permissions` is true,
-/// Nova's Claude Code tool string drops `Edit, Write` — the only path to
-/// write files becomes the MCP `protected_write` tool that routes through
-/// the bootstrap guardian.
-///
-/// The old spawn_process() stays as a thin wrapper for backwards
-/// compatibility inside the crate; the harness's top-level entry point
-/// calls this directly.
+/// Spawn the Claude Code subprocess. Takes the `use_protected_write` flag
+/// so Nova's tool string can drop Bash/Edit/Write in favor of the MCP
+/// `protected_write` shim — see `compute_allowed_tools` for the matrix.
 fn spawn_process_with_guardian(
     system_prompt: &str,
     resume_session: Option<&str>,
@@ -1249,25 +1246,8 @@ fn spawn_process_with_guardian(
     let schema_str =
         serde_json::to_string(&schema).map_err(|e| format!("Failed to serialize schema: {}", e))?;
 
-    // SECURITY: Tool selection by tier, with optional override.
-    // Tier 1 (full_permissions=true): Bash,Edit,Write,Read,WebSearch
-    //   Or when nova_use_protected_write=true: Bash,Read,WebSearch
-    //   (Edit/Write dropped — writes route through MCP `protected_write`
-    //    to the bootstrap guardian, which refuses modifications to the
-    //    harness source, configs, and supervisor.)
-    // Tier 2 (full_permissions=false): WebSearch only
-    // Custom: tools_override (e.g. "Bash,Read,WebSearch" for Sentinel eval)
-    let tools_string;
-    let tools: &str = if let Some(override_tools) = tools_override {
-        tools_string = override_tools.clone();
-        &tools_string
-    } else if full_permissions && use_protected_write {
-        "Bash,Read,WebSearch"
-    } else if full_permissions {
-        "Bash,Edit,Write,Read,WebSearch"
-    } else {
-        "WebSearch"
-    };
+    let tools_string = compute_allowed_tools(full_permissions, use_protected_write, tools_override);
+    let tools: &str = &tools_string;
     info!(
         "Claude Code tools: {} (full_permissions={}, override={:?})",
         tools, full_permissions, tools_override

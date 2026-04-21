@@ -112,8 +112,38 @@ if [ "$os" = "Darwin" ]; then
 elif [ "$os" = "Linux" ]; then
   unit_src="$repo_root/bootstrap-guardian/deploy/bootstrap-guardian.service.tmpl"
   unit_dst="/etc/systemd/system/bootstrap-guardian.service"
-  guardian_user="${CLAUDIR_GUARDIAN_USER:-$(id -un)}"
+  # UID separation is mandatory in prod — /review security flagged that
+  # the guardian provides ZERO defense-in-depth when it runs as the same
+  # UID as the harness (harness can then directly read guardian.key and
+  # mint HMACs, or just bypass the socket entirely and fs::write to
+  # protected paths since file permissions permit it).
+  harness_user="${CLAUDIR_HARNESS_USER:-$(id -un)}"
+  guardian_user="${CLAUDIR_GUARDIAN_USER:-$harness_user}"
   guardian_group="${CLAUDIR_GUARDIAN_GROUP:-$(id -gn)}"
+
+  if [ "$env_name" = "prod" ] && [ "$guardian_user" = "$harness_user" ] \
+      && [ "${CLAUDIR_ALLOW_SAME_UID:-0}" != "1" ]; then
+    cat >&2 <<EOF
+ERROR: guardian UID equals harness UID ($guardian_user).
+  When they are the same user, the guardian provides no real protection —
+  the harness can read guardian.key (mode 0400) and mint any HMAC, or
+  just write to protected paths directly since the file permissions
+  allow it.
+
+  Set CLAUDIR_GUARDIAN_USER to a dedicated system user (e.g. claudir-guardian)
+  that does NOT share a group with the harness user. The guardian-owned
+  protected paths should be 0644 owned by \$CLAUDIR_GUARDIAN_USER so the
+  harness can read them but not write.
+
+  If you understand the trade-off and are building a dev/sandbox
+  deployment, set CLAUDIR_ALLOW_SAME_UID=1 and re-run.
+EOF
+    exit 4
+  fi
+  if [ "$guardian_user" = "$harness_user" ]; then
+    echo "[WARN] guardian UID == harness UID. Defense-in-depth disabled." >&2
+    echo "[WARN] Running with CLAUDIR_ALLOW_SAME_UID=1 override." >&2
+  fi
   # allowed_roots aren't read from config here — operator edits the unit file afterwards.
   allowed_roots_placeholder="$run_dir"
   echo "Rendering unit (will need sudo to install)..."

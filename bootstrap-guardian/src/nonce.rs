@@ -62,6 +62,34 @@ impl NonceStore {
         Ok(true)
     }
 
+    /// Non-mutating check: would `consume(uid, incoming)` succeed right now?
+    /// Used by the server to validate a nonce BEFORE attempting the op, so a
+    /// transient write failure does not burn the nonce. The server then
+    /// calls `consume` only AFTER the op succeeds.
+    ///
+    /// This is NOT racy in the single-threaded-per-request model the guardian
+    /// uses: we still hold the connection mutex exclusively in `consume`, and
+    /// the peer UID is authenticated. Two concurrent requests from the same
+    /// UID that both pass `would_accept` would both attempt `consume`; the
+    /// second one loses the compare-and-swap and gets `Ok(false)`.
+    pub fn would_accept(&self, uid: u32, incoming: u64) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("nonce store mutex poisoned"))?;
+        let current: Option<i64> = conn
+            .query_row(
+                "SELECT highest_seen FROM nonces WHERE uid = ?1",
+                params![uid as i64],
+                |row| row.get(0),
+            )
+            .ok();
+        match current {
+            Some(cur) => Ok((incoming as i64) > cur),
+            None => Ok(true),
+        }
+    }
+
     #[cfg(test)]
     pub fn peek(&self, uid: u32) -> Option<i64> {
         let conn = self.conn.lock().unwrap();

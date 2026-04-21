@@ -153,6 +153,39 @@ mod tests {
         assert_ne!(base, compute_hmac(&key, Op::Write, "/x/y", b"hello", 43));
     }
 
+    /// Cross-crate wire-compat pin. The harness's `src/guardian_client.rs`
+    /// has an IDENTICAL test asserting the same hex string — if either side
+    /// ever drifts (tag bytes, separator, hash order, nonce endianness) the
+    /// matching harness test will fail first at CI time, loud and fast,
+    /// instead of silently breaking HMAC at runtime.
+    ///
+    /// Fixture inputs: key = 0u8..64u8, op = Write, path = "/a", bytes = b"x", nonce = 1.
+    /// To regenerate if the protocol changes deliberately: run this test,
+    /// paste the new hex here AND in guardian_client.rs's `hmac_wire_fixture`.
+    #[test]
+    fn hmac_wire_fixture_write_op() {
+        let key: Vec<u8> = (0..64).collect();
+        let got = compute_hmac(&key, Op::Write, "/a", b"x", 1);
+        // Value pinned from this exact implementation; the harness's
+        // guardian_client::tests::hmac_wire_fixture asserts the same string.
+        assert_eq!(
+            got, "c28f43f14294ab137e3be1662eb17ad95057fc90af682ef6df2fdbf880613892",
+            "HMAC wire format changed. If deliberate, update this test AND the \
+             twin in src/guardian_client.rs together."
+        );
+    }
+
+    /// Same idea, covering the ping op-tag path.
+    #[test]
+    fn hmac_wire_fixture_ping_op() {
+        let key: Vec<u8> = (0..64).collect();
+        let got = compute_hmac(&key, Op::Ping, "", &[], 1);
+        assert_eq!(
+            got, "4f4a2d97f99a96ddeffd284dea1e6a5136cf09b328636fdeab76c5965d2d1615",
+            "HMAC wire format for Ping changed. Update both tests."
+        );
+    }
+
     #[test]
     fn constant_time_eq_correct() {
         assert!(constant_time_eq("abc", "abc"));
