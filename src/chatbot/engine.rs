@@ -843,6 +843,11 @@ impl ChatbotEngine {
                     info!("🔀 Routing to QUICK lane (deep lane busy)");
                     let mut p = self.quick_pending.lock().await;
                     p.push(msg);
+                    // Wake symmetry: also notify when quick lane receives a
+                    // message, in case the deep-lane sleep was what made
+                    // this route "busy" in the first place.
+                    crate::chatbot::event_bus::global_event_bus()
+                        .wake(&self.config.bot_name);
                     if let Some(ref debouncer) = self.quick_debouncer {
                         debouncer.trigger().await;
                     }
@@ -859,6 +864,15 @@ impl ChatbotEngine {
             let mut p = self.pending.lock().await;
             p.push(msg);
         }
+
+        // Wake Nova / any bot that is currently in `action=sleep`. Without
+        // this, the sleep at engine.rs:~1218 runs its full tokio::sleep
+        // timeout (up to 5 min) and incoming DMs wait for it. Smoke test
+        // on 2026-04-21 caught a "Done?" message waiting 37s of a 60s sleep
+        // before being answered — because no one was notifying the bus.
+        // Bot-to-bot messages already wake via bot_messages.rs:1347; this
+        // closes the symmetric gap for Telegram DMs.
+        crate::chatbot::event_bus::global_event_bus().wake(&self.config.bot_name);
 
         if let Some(ref debouncer) = self.debouncer {
             debouncer.trigger().await;
