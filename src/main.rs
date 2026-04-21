@@ -547,7 +547,7 @@ fn run_wrapper(config_path: &str) -> ! {
 /// Returns `(wrapper_mode, config_path)`.
 fn parse_args() -> (bool, String) {
     let args: Vec<String> = std::env::args().collect();
-    let mut config_path = "claudir.json".to_string();
+    let mut config_path = "trio.json".to_string();
     let mut wrapper_mode = false;
 
     let mut i = 1;
@@ -576,7 +576,7 @@ fn parse_args() -> (bool, String) {
     (wrapper_mode, config_path)
 }
 
-/// Retention sweeper for `claudir.log.*`. Deletes files older than
+/// Retention sweeper for `trio.log.*`. Deletes files older than
 /// `max_age_days`.
 ///
 /// **Honest status on size caps:** an earlier version of this function
@@ -605,7 +605,7 @@ async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()
             Some(n) => n.to_string(),
             None => continue,
         };
-        if !name.starts_with("claudir.log") {
+        if !name.starts_with("trio.log") {
             continue;
         }
         let meta = match tokio::fs::metadata(&path).await {
@@ -681,9 +681,9 @@ mod sweep_tests {
     #[tokio::test]
     async fn sweep_deletes_files_older_than_max_age() {
         let (td, paths) = mk_logs(&[
-            ("claudir.log.2026-04-10", 15), // stale
-            ("claudir.log.2026-04-20", 2),  // fresh
-            ("claudir.log", 1),             // current
+            ("trio.log.2026-04-10", 15), // stale
+            ("trio.log.2026-04-20", 2),  // fresh
+            ("trio.log", 1),             // current
         ]);
         sweep_old_logs(td.path(), 7).await.unwrap();
         assert!(!paths[0].exists(), "stale file must be deleted");
@@ -692,9 +692,9 @@ mod sweep_tests {
     }
 
     #[tokio::test]
-    async fn sweep_ignores_non_claudir_files() {
+    async fn sweep_ignores_non_trio_files() {
         let (td, paths) = mk_logs(&[
-            ("claudir.log.old", 30),
+            ("trio.log.old", 30),
             ("other-app.log", 30), // not ours — must NOT delete
         ]);
         sweep_old_logs(td.path(), 7).await.unwrap();
@@ -731,8 +731,8 @@ async fn main() {
     // Setup logging — Phase 0 log rotation with REAL size cap.
     //
     // Uses the `file-rotate` crate for size-capped rotation: when
-    // `claudir.log` exceeds 100 MiB, it's renamed to
-    // `claudir.log.YYYYMMDD-HHMMSS` and a fresh file is opened. The
+    // `trio.log` exceeds 100 MiB, it's renamed to
+    // `trio.log.YYYYMMDD-HHMMSS` and a fresh file is opened. The
     // tracing appender keeps writing to the same path (file-rotate
     // reopens the target on rotation, unlike a bare Unix rename that
     // would keep the fd on the old inode).
@@ -750,7 +750,7 @@ async fn main() {
     // every 60 seconds and log a `warn!` when the counter advances.
     let log_dir = config.data_dir.join("logs");
     std::fs::create_dir_all(&log_dir).ok();
-    let log_path = log_dir.join("claudir.log");
+    let log_path = log_dir.join("trio.log");
     let rotator = file_rotate::FileRotate::new(
         &log_path,
         file_rotate::suffix::AppendTimestamp::default(file_rotate::suffix::FileLimit::MaxFiles(168)),
@@ -823,7 +823,7 @@ async fn main() {
         registry.init();
     }
 
-    info!("🚀 Starting claudir...");
+    info!("🚀 Starting trio...");
     info!("Loaded config from {config_path}");
     info!("Owner IDs: {:?}", config.owner_ids);
     if config.dry_run {
@@ -1187,7 +1187,7 @@ async fn handle_dm(
             None => {
                 bot.send_message(
                     msg.chat.id,
-                    "⚠️ live_app_url not configured in claudir.json",
+                    "⚠️ live_app_url not configured in trio.json",
                 )
                 .await
                 .ok();

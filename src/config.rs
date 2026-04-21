@@ -110,7 +110,7 @@ struct ConfigFile {
     #[serde(default)]
     guardian_enabled: bool,
     /// Absolute path to the guardian's UDS socket.
-    /// Defaults to `/opt/claudir/run/bootstrap-guardian.sock` in prod-like
+    /// Defaults to `/opt/trio/run/bootstrap-guardian.sock` in prod-like
     /// environments; set explicitly for dev.
     #[serde(default)]
     guardian_socket_path: Option<String>,

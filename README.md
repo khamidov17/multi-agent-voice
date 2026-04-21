@@ -102,10 +102,10 @@ Then use `reference_id: "myvoice"` in TTS requests.
 
 1. Copy the example config:
    ```bash
-   cp claudir.example.json claudir.json
+   cp trio.example.json trio.json
    ```
 
-2. Edit `claudir.json` with your credentials:
+2. Edit `trio.json` with your credentials:
    - `telegram_bot_token` - from @BotFather
    - `anthropic_api_key` - from Anthropic console
    - `owner_ids` - your Telegram user ID(s)
@@ -116,7 +116,7 @@ Then use `reference_id: "myvoice"` in TTS requests.
 3. Build and run:
    ```bash
    cargo build --release
-   ./target/release/claudir claudir.json
+   ./target/release/trio trio.json
    ```
 
 ## Config Options

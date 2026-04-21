@@ -10,7 +10,7 @@
 //!
 //! The override path is intentionally not wired through the harness: it is
 //! owner-only, and owner-only means `ava` running `guardianctl` on the box
-//! with access to `~/.config/claudir/override.key`.
+//! with access to `~/.config/trio/override.key`.
 
 use anyhow::{Context, Result, anyhow};
 use bootstrap_guardian::GuardianConfig;
@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 #[command(version, about = "Owner break-glass CLI for the bootstrap-guardian")]
 struct Cli {
     /// Path to guardian.json.
-    #[arg(short, long, default_value = "/opt/claudir/guardian.json")]
+    #[arg(short, long, default_value = "/opt/trio/guardian.json")]
     config: PathBuf,
 
     #[command(subcommand)]

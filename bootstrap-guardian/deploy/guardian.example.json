@@ -1,25 +1,25 @@
 {
   "dev": {
-    "run_dir": "/Users/ava/claudir-dev/run",
+    "run_dir": "/Users/ava/trio-dev/run",
     "protected_paths": [
-      "/Users/ava/claudir-dev/src",
-      "/Users/ava/claudir-dev/supervisor",
-      "/Users/ava/claudir-dev/Cargo.toml",
-      "/Users/ava/claudir-dev/Cargo.lock",
-      "/Users/ava/claudir-dev/atlas.json",
-      "/Users/ava/claudir-dev/nova.json",
-      "/Users/ava/claudir-dev/sentinel.json"
+      "/Users/ava/trio-dev/src",
+      "/Users/ava/trio-dev/supervisor",
+      "/Users/ava/trio-dev/Cargo.toml",
+      "/Users/ava/trio-dev/Cargo.lock",
+      "/Users/ava/trio-dev/atlas.json",
+      "/Users/ava/trio-dev/nova.json",
+      "/Users/ava/trio-dev/sentinel.json"
     ],
     "allowed_roots": [
-      "/Users/ava/claudir-dev/data",
-      "/Users/ava/claudir-dev/logs",
-      "/tmp/claudir-scratch"
+      "/Users/ava/trio-dev/data",
+      "/Users/ava/trio-dev/logs",
+      "/tmp/trio-scratch"
     ],
     "allowed_uids": [501],
     "request_timeout_secs": 5
   },
   "prod": {
-    "run_dir": "/opt/claudir/run",
+    "run_dir": "/opt/trio/run",
     "protected_paths": [
       "/opt/nova/src",
       "/opt/nova/supervisor",
@@ -37,7 +37,7 @@
     "allowed_roots": [
       "/opt/nova/data",
       "/opt/nova/logs",
-      "/tmp/claudir-scratch"
+      "/tmp/trio-scratch"
     ],
     "allowed_uids": [1000],
     "request_timeout_secs": 5

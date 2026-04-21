@@ -1306,7 +1306,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "log_file": { "type": "string", "description": "Log file path relative to data dir (e.g. 'logs/claudir.log')" },
+                    "log_file": { "type": "string", "description": "Log file path relative to data dir (e.g. 'logs/trio.log')" },
                     "error_patterns": { "type": "array", "items": {"type": "string"}, "description": "Regex patterns to search for" },
                     "since_minutes": { "type": "integer", "description": "Only check last N minutes (default: 5)", "default": 5 }
                 },

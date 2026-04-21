@@ -2,12 +2,12 @@
 name = "bootstrap-guardian"
 version = "0.1.0"
 edition = "2024"
-description = "Write-guarding process for Claudir: prevents Nova from modifying its own harness/wrapper/config at 3am"
+description = "Write-guarding process for Trio: prevents Nova from modifying its own harness/wrapper/config at 3am"
 license = "MIT"
 
 [features]
 default = []
-# Enables bind/connect to real /opt/claudir/run/ paths. Tests omit this.
+# Enables bind/connect to real /opt/trio/run/ paths. Tests omit this.
 prod_paths = []
 
 [[bin]]

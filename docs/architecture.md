@@ -1,4 +1,4 @@
-# Claudir Architecture
+# Trio Architecture
 
 Three bots, three trust levels, one Rust binary. Owner controls everything via Telegram. Each bot instance runs as three OS processes: wrapper (crash recovery), harness (Rust, Telegram I/O, MCP tools), and Claude Code (AI reasoning subprocess).
 
@@ -47,7 +47,7 @@ Every bot instance runs as three nested OS processes:
 
 ```
  +-------------+      +------------------------+      +-------------------+
- |   Wrapper   | ---> |   Harness (claudir)    | ---> |   Claude Code     |
+ |   Wrapper   | ---> |   Harness (trio)    | ---> |   Claude Code     |
  |             |      |                        |      |                   |
  | Crash       |      | - Telegram dispatcher  |      | - AI reasoning    |
  | recovery    |      | - MCP tool server      |      | - stdin/stdout    |
@@ -177,7 +177,7 @@ When Claude Code tries to stop but new messages arrived during processing:
 
 ## 3. Bot-to-Bot Communication
 
-Telegram bots cannot see messages from other bots in groups (API limitation). Claudir works around this with a shared SQLite database.
+Telegram bots cannot see messages from other bots in groups (API limitation). Trio works around this with a shared SQLite database.
 
 ### 3.1 Shared Database Bus
 
@@ -373,7 +373,7 @@ During long MCP operations (image generation), stdout goes silent, triggering fa
 
 ## 7. Database Schema Overview
 
-Each bot has its own `claudir.db` (SQLite) plus the shared `bot_messages.db`.
+Each bot has its own `trio.db` (SQLite) plus the shared `bot_messages.db`.
 
 ### 7.1 Core Tables
 
@@ -525,7 +525,7 @@ whisper_model_path   -- local Whisper model (.bin)
 data/
   nova/
     session_id          # Claude Code session persistence
-    claudir.db          # Personal SQLite database
+    trio.db          # Personal SQLite database
     context.json        # Context buffer state
     reminders.db        # Reminder store
     tos_accepted.json   # ToS acceptance list
@@ -533,10 +533,10 @@ data/
       SYSTEM.md         # Bot-specific system prompt
       reflections/      # Self-improvement journal
     logs/
-      claudir.log
+      trio.log
   atlas/
     session_id
-    claudir.db
+    trio.db
     context.json
     memories/
     logs/
@@ -553,14 +553,14 @@ data/
 cargo build --release
 
 # Start Atlas (public chatbot) -- Tier 2
-./target/release/claudir atlas.json
+./target/release/trio atlas.json
 
 # Start Nova (CTO) -- Tier 1 (separate binary in supervisor/)
 cd supervisor && cargo build --release
 ./target/release/nova nova.json
 
 # Start Sentinel (security monitor) -- Tier 2
-./target/release/claudir sentinel.json
+./target/release/trio sentinel.json
 ```
 
 Wrapper mode is the default. The binary re-resolves its own path on every restart, so `cargo build --release` deploys automatically without restarting the wrapper.

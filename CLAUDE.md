@@ -1,4 +1,4 @@
-# Claudir — Three-Tier Telegram Bot Architecture
+# Trio — Three-Tier Telegram Bot Architecture
 
 ## Phase 0 — Bootstrap Guardian (COMPLETE — 2026-04-21)
 
@@ -8,7 +8,7 @@ A new Rust crate lives at [`bootstrap-guardian/`](bootstrap-guardian/). It is th
 
 - **`nova_use_protected_write` flag is now actually plumbed to `ClaudeCode`** — previously dead code, flipping it had no effect. Now the harness routes through `start_with_guardian` with the real flag.
 - **Bash is dropped from Nova's tool string** when the flag is on, not just Edit/Write. Bash could read `guardian.key` (0400 but owned by the harness UID = Bash UID) and mint its own HMAC, bypassing the guardian entirely. Nova in locked mode now gets `Read,WebSearch` only + the MCP `protected_write` tool.
-- **Bootstrap script rejects same-UID installs in prod** (`CLAUDIR_ALLOW_SAME_UID=1` override for dev sandboxes). Without UID separation filesystem perms can't actually enforce the invariant.
+- **Bootstrap script rejects same-UID installs in prod** (`TRIO_ALLOW_SAME_UID=1` override for dev sandboxes). Without UID separation filesystem perms can't actually enforce the invariant.
 - **Atomic writes** in the guardian via tempfile + rename. Previous `create+truncate+write` was not crash-safe and concurrent writes to the same path interleaved bytes. Now each call writes to `.tmp.<pid>.<nanos>` with `O_EXCL|O_NOFOLLOW`, fsyncs, and atomically renames over the target.
 - **Two-phase nonce:** `would_accept` peek BEFORE op, `consume` AFTER successful op. A transient fs error no longer burns a nonce.
 - **16 MiB request cap** on the guardian UDS read path to block unbounded-stream DoS.
@@ -45,7 +45,7 @@ What is still deferred (tracked in TODOS.md):
 
 **What you can do with the guardian today:** run `cargo test -p bootstrap-guardian` to verify the full decision matrix (Allow / DenyProtected / DenyOutsideAllowed / PathTraversal / BadHmac / ReplayDetected / UidMismatch / Paused / Malformed / Ping). Run `./scripts/bootstrap-phase0.sh` to install the launchd plist or systemd unit. Run `guardianctl status` after the guardian is up.
 
-**Full architecture + operations:** [`docs/bootstrap-guardian.md`](docs/bootstrap-guardian.md). Full design-doc chain: `~/.gstack/projects/ava/ava-claudir-main-design-20260421-003433.md`.
+**Full architecture + operations:** [`docs/bootstrap-guardian.md`](docs/bootstrap-guardian.md). Full design-doc chain: `~/.gstack/projects/ava/ava-trio-main-design-20260421-003433.md`.
 
 **Roadmap from here:**
 
@@ -58,7 +58,7 @@ What is still deferred (tracked in TODOS.md):
 
 ## Overview
 
-Three bots, three trust levels, one Rust binary (`claudir`). Owner controls via Telegram.
+Three bots, three trust levels, one Rust binary (`trio`). Owner controls via Telegram.
 Each bot = three OS processes: wrapper (crash recovery) → harness (Rust, Telegram I/O, MCP) → Claude Code (AI subprocess).
 
 **Owner:** `8202621898`
@@ -72,7 +72,7 @@ Each bot = three OS processes: wrapper (crash recovery) → harness (Rust, Teleg
 │                                                                      │
 │  Owner communicates via Telegram (bot_xona or DMs to Nova).          │
 │  Supervisor = raw `claude` CLI on the server, used only for          │
-│  manual intervention (emergency fixes, debugging). NOT the claudir   │
+│  manual intervention (emergency fixes, debugging). NOT the trio   │
 │  binary. Most of the time it does nothing — exists as a fallback.    │
 └─────────────────────────────────────────────────────────────────────┘
 
@@ -134,7 +134,7 @@ Every bot instance runs as three OS processes:
 
 ```
 ┌─────────────┐     ┌──────────────────────┐     ┌─────────────────┐
-│   Wrapper    │────▶│   Harness (claudir)  │────▶│   Claude Code   │
+│   Wrapper    │────▶│   Harness (trio)  │────▶│   Claude Code   │
 │  (crash      │     │   - Telegram I/O     │     │   (AI brain)    │
 │   recovery)  │     │   - MCP tool server  │     │   - stdin/stdout│
 │              │     │   - Spam filtering   │     │     streaming   │
@@ -280,7 +280,7 @@ The entity executing code (Nova) never sees raw user messages — only sanitized
 
 ## Database Schema (~20 tables)
 
-Each bot has its own `claudir.db` plus the shared `bot_messages.db`.
+Each bot has its own `trio.db` plus the shared `bot_messages.db`.
 
 ### Core
 - `messages` — all messages seen (group + DM), composite PK `(chat_id, message_id)`
@@ -341,14 +341,14 @@ Message arrives → saved to DB always (nothing lost)
 ```bash
 # Start Atlas (public chatbot) — Tier 2
 cargo build --release
-./target/release/claudir atlas.json
+./target/release/trio atlas.json
 
 # Start Nova (CTO) — Tier 1 (separate terminal or systemd)
 cd supervisor && cargo build --release
 ./target/release/nova nova.json
 
 # Start Sentinel (security monitor) — Tier 2
-./target/release/claudir sentinel.json
+./target/release/trio sentinel.json
 ```
 
 ## Config Files
@@ -370,16 +370,16 @@ data/
   nova/
     bot.json          # full_permissions=true, owner_dms_only=true
     session_id        # Claude Code session persistence
-    claudir.db        # Personal DB
+    trio.db        # Personal DB
     memories/         # Persistent memory files
       SYSTEM.md       # Bot-specific system prompt
       reflections/    # Self-improvement journal
     logs/
-      claudir.log
+      trio.log
   atlas/
     bot.json          # full_permissions=false
     session_id
-    claudir.db
+    trio.db
     memories/
     logs/
   shared/
@@ -454,7 +454,7 @@ There are NO user-facing slash commands (except /start for DM onboarding). All m
 
 ```bash
 # Quick health check
-pgrep -a claudir && tail -20 data/atlas/logs/claudir.log
+pgrep -a trio && tail -20 data/atlas/logs/trio.log
 
 # Check bug reports
 cat data/atlas/feedback.log

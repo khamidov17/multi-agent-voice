@@ -1,9 +1,9 @@
 //! End-to-end integration tests for the Phase 0 MCP `protected_write`
 //! dispatch. Spawns a real [`bootstrap_guardian::Guardian`] in a background
-//! thread, points a real [`claudir::guardian_client::GuardianClient`] at it,
+//! thread, points a real [`trio::guardian_client::GuardianClient`] at it,
 //! and drives the harness-side `execute_protected_write` flow through a
-//! real [`claudir::chatbot::engine::ChatbotConfig`] + in-memory
-//! [`claudir::chatbot::database::Database`].
+//! real [`trio::chatbot::engine::ChatbotConfig`] + in-memory
+//! [`trio::chatbot::database::Database`].
 //!
 //! Closes the "main-crate has no integration harness" gap /review testing
 //! specialist flagged. The guardian crate has its own 13 integration
@@ -16,9 +16,9 @@
 #![allow(clippy::await_holding_lock)]
 
 use bootstrap_guardian::{Guardian, GuardianConfig};
-use claudir::chatbot::database::Database;
-use claudir::chatbot::engine::ChatbotConfig;
-use claudir::guardian_client::{GuardianClient, WriteResult};
+use trio::chatbot::database::Database;
+use trio::chatbot::engine::ChatbotConfig;
+use trio::guardian_client::{GuardianClient, WriteResult};
 use serial_test::serial;
 use std::path::PathBuf;
 use std::sync::Arc;

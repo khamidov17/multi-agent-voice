@@ -1,4 +1,4 @@
-//! Bootstrap guardian — write-guarding process for Claudir.
+//! Bootstrap guardian — write-guarding process for Trio.
 //!
 //! Prevents Nova (via Claude Code `Edit`/`Write` through the harness MCP
 //! `protected_write` shim) from modifying its own harness, wrapper, or

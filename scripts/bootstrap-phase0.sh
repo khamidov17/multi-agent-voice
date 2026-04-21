@@ -7,34 +7,34 @@
 #
 # Usage:
 #   ./scripts/bootstrap-phase0.sh            # interactive, dev defaults
-#   CLAUDIR_ENV=prod ./scripts/bootstrap-phase0.sh
+#   TRIO_ENV=prod ./scripts/bootstrap-phase0.sh
 #
 # Requires: cargo, whichever of launchctl/systemctl your OS has, openssl.
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-env_name="${CLAUDIR_ENV:-dev}"
+env_name="${TRIO_ENV:-dev}"
 case "$env_name" in
   dev|prod) ;;
   *)
-    echo "CLAUDIR_ENV must be 'dev' or 'prod', got '$env_name'" >&2
+    echo "TRIO_ENV must be 'dev' or 'prod', got '$env_name'" >&2
     exit 2
     ;;
 esac
 
 default_run_dir() {
   if [ "$env_name" = "dev" ]; then
-    echo "$HOME/claudir-dev/run"
+    echo "$HOME/trio-dev/run"
   else
-    echo "/opt/claudir/run"
+    echo "/opt/trio/run"
   fi
 }
 
-run_dir="${CLAUDIR_RUN_DIR:-$(default_run_dir)}"
-config_path="${CLAUDIR_GUARDIAN_CONFIG:-$(dirname "$run_dir")/guardian.json}"
+run_dir="${TRIO_RUN_DIR:-$(default_run_dir)}"
+config_path="${TRIO_GUARDIAN_CONFIG:-$(dirname "$run_dir")/guardian.json}"
 
-echo "=== Claudir Phase 0 bootstrap ==="
+echo "=== Trio Phase 0 bootstrap ==="
 echo "  env:         $env_name"
 echo "  run_dir:     $run_dir"
 echo "  config:      $config_path"
@@ -93,20 +93,20 @@ echo ""
 echo "=== Installing service unit ==="
 os="$(uname -s)"
 if [ "$os" = "Darwin" ]; then
-  plist_src="$repo_root/bootstrap-guardian/deploy/com.claudir.bootstrap-guardian.plist.tmpl"
-  plist_dst="$HOME/Library/LaunchAgents/com.claudir.bootstrap-guardian.plist"
+  plist_src="$repo_root/bootstrap-guardian/deploy/com.trio.bootstrap-guardian.plist.tmpl"
+  plist_dst="$HOME/Library/LaunchAgents/com.trio.bootstrap-guardian.plist"
   mkdir -p "$HOME/Library/LaunchAgents"
   sed \
-    -e "s#CLAUDIR_GUARDIAN_BIN#$guardian_bin#g" \
-    -e "s#CLAUDIR_GUARDIAN_CONFIG#$config_path#g" \
-    -e "s#CLAUDIR_RUN_DIR#$run_dir#g" \
+    -e "s#TRIO_GUARDIAN_BIN#$guardian_bin#g" \
+    -e "s#TRIO_GUARDIAN_CONFIG#$config_path#g" \
+    -e "s#TRIO_RUN_DIR#$run_dir#g" \
     "$plist_src" > "$plist_dst"
   chmod 0644 "$plist_dst"
   echo "[CREATE] $plist_dst"
   echo ""
   echo "To load and start:"
   echo "  launchctl bootstrap gui/\$(id -u) $plist_dst"
-  echo "  launchctl kickstart gui/\$(id -u)/com.claudir.bootstrap-guardian"
+  echo "  launchctl kickstart gui/\$(id -u)/com.trio.bootstrap-guardian"
   echo "To verify:"
   echo "  $guardianctl_bin --config $config_path status"
 elif [ "$os" = "Linux" ]; then
@@ -117,12 +117,12 @@ elif [ "$os" = "Linux" ]; then
   # UID as the harness (harness can then directly read guardian.key and
   # mint HMACs, or just bypass the socket entirely and fs::write to
   # protected paths since file permissions permit it).
-  harness_user="${CLAUDIR_HARNESS_USER:-$(id -un)}"
-  guardian_user="${CLAUDIR_GUARDIAN_USER:-$harness_user}"
-  guardian_group="${CLAUDIR_GUARDIAN_GROUP:-$(id -gn)}"
+  harness_user="${TRIO_HARNESS_USER:-$(id -un)}"
+  guardian_user="${TRIO_GUARDIAN_USER:-$harness_user}"
+  guardian_group="${TRIO_GUARDIAN_GROUP:-$(id -gn)}"
 
   if [ "$env_name" = "prod" ] && [ "$guardian_user" = "$harness_user" ] \
-      && [ "${CLAUDIR_ALLOW_SAME_UID:-0}" != "1" ]; then
+      && [ "${TRIO_ALLOW_SAME_UID:-0}" != "1" ]; then
     cat >&2 <<EOF
 ERROR: guardian UID equals harness UID ($guardian_user).
   When they are the same user, the guardian provides no real protection —
@@ -130,31 +130,31 @@ ERROR: guardian UID equals harness UID ($guardian_user).
   just write to protected paths directly since the file permissions
   allow it.
 
-  Set CLAUDIR_GUARDIAN_USER to a dedicated system user (e.g. claudir-guardian)
+  Set TRIO_GUARDIAN_USER to a dedicated system user (e.g. trio-guardian)
   that does NOT share a group with the harness user. The guardian-owned
-  protected paths should be 0644 owned by \$CLAUDIR_GUARDIAN_USER so the
+  protected paths should be 0644 owned by \$TRIO_GUARDIAN_USER so the
   harness can read them but not write.
 
   If you understand the trade-off and are building a dev/sandbox
-  deployment, set CLAUDIR_ALLOW_SAME_UID=1 and re-run.
+  deployment, set TRIO_ALLOW_SAME_UID=1 and re-run.
 EOF
     exit 4
   fi
   if [ "$guardian_user" = "$harness_user" ]; then
     echo "[WARN] guardian UID == harness UID. Defense-in-depth disabled." >&2
-    echo "[WARN] Running with CLAUDIR_ALLOW_SAME_UID=1 override." >&2
+    echo "[WARN] Running with TRIO_ALLOW_SAME_UID=1 override." >&2
   fi
   # allowed_roots aren't read from config here — operator edits the unit file afterwards.
   allowed_roots_placeholder="$run_dir"
   echo "Rendering unit (will need sudo to install)..."
   tmp_unit="$(mktemp)"
   sed \
-    -e "s#CLAUDIR_GUARDIAN_BIN#$guardian_bin#g" \
-    -e "s#CLAUDIR_GUARDIAN_CONFIG#$config_path#g" \
-    -e "s#CLAUDIR_RUN_DIR#$run_dir#g" \
-    -e "s#CLAUDIR_GUARDIAN_USER#$guardian_user#g" \
-    -e "s#CLAUDIR_GUARDIAN_GROUP#$guardian_group#g" \
-    -e "s#CLAUDIR_ALLOWED_ROOTS#$allowed_roots_placeholder#g" \
+    -e "s#TRIO_GUARDIAN_BIN#$guardian_bin#g" \
+    -e "s#TRIO_GUARDIAN_CONFIG#$config_path#g" \
+    -e "s#TRIO_RUN_DIR#$run_dir#g" \
+    -e "s#TRIO_GUARDIAN_USER#$guardian_user#g" \
+    -e "s#TRIO_GUARDIAN_GROUP#$guardian_group#g" \
+    -e "s#TRIO_ALLOWED_ROOTS#$allowed_roots_placeholder#g" \
     "$unit_src" > "$tmp_unit"
   echo "[NEXT] sudo mv $tmp_unit $unit_dst && sudo systemctl daemon-reload"
   echo "[NEXT] sudo systemctl enable --now bootstrap-guardian"
