@@ -904,11 +904,24 @@ fn setup_claude_process(
         }
     });
 
-    // Send first message to trigger Claude Code output
+    // Send a short init message to trigger Claude Code's first output.
+    //
+    // **This is load-bearing.** Do NOT send `system_prompt` as a user message —
+    // the system prompt is already passed via `--system-prompt` on the Command
+    // line above (see `spawn_process_with_guardian`). Dumping it again as a
+    // user message with nothing to respond to triggers an infinite synthetic-
+    // response loop under `--json-schema`: Claude emits empty/synthetic, CC
+    // rejects it, injects "Stop hook feedback: You MUST call the Structured
+    // output tool", Claude emits synthetic again, ~1000 loops/sec.
+    //
+    // The init prompt asks for a `sleep` structured response, which is the
+    // correct "no work to do" action in Nova's control schema. This gives
+    // Claude a well-defined thing to emit, the schema validates, the harness
+    // moves past startup into its normal message loop.
     let first_message = if resume_session.is_some() {
-        "Session resumed. Ready for new messages.".to_string()
+        "Session resumed. No pending work — call StructuredOutput with action=sleep until a new message arrives.".to_string()
     } else {
-        system_prompt.to_string()
+        "Startup handshake. No pending work — call StructuredOutput with action=sleep (e.g. 60000 ms) until a new message arrives.".to_string()
     };
     send_message(&mut stdin, &first_message)?;
 
@@ -1278,6 +1291,19 @@ fn spawn_process_with_guardian(
 
     // Sandbox: resource limits for Claude Code subprocesses.
     // Prevents runaway processes from consuming all system resources.
+    //
+    // Limits MUST be generous enough that Claude Code can bootstrap cleanly.
+    // A too-tight RLIMIT_NOFILE (previously 1024) broke macOS keychain auth
+    // on the subprocess — keychain access opens a lot of fds for XPC
+    // connections, MCP servers, config files, etc. When that ran out, auth
+    // silently fell through to "Not logged in · Please run /login", which
+    // Claude Code's schema enforcer then tried to wrap in a StructuredOutput
+    // call, spinning a synthetic-response loop at ~1000/sec. Nova was
+    // completely bricked on 2026-04-21 by this.
+    //
+    // Raised to match typical macOS defaults: NOFILE 10240, NPROC 2048.
+    // Memory cap stays at 4 GB — runaway claude subprocesses were the
+    // original motivation.
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -1288,12 +1314,12 @@ fn spawn_process_with_guardian(
                 rlim_max: 4_294_967_296,
             }; // 4GB
             let files = rlimit {
-                rlim_cur: 1024,
-                rlim_max: 1024,
+                rlim_cur: 10_240,
+                rlim_max: 10_240,
             };
             let procs = rlimit {
-                rlim_cur: 300,
-                rlim_max: 300,
+                rlim_cur: 2048,
+                rlim_max: 2048,
             };
             let _ = setrlimit(RLIMIT_AS, &mem);
             let _ = setrlimit(RLIMIT_NOFILE, &files);
@@ -1308,8 +1334,19 @@ fn spawn_process_with_guardian(
         cmd.args(["--resume", session_id]);
     }
 
-    // Unset CLAUDECODE to allow spawning inside a supervisor Claude Code session
+    // Strip every Claude-Code-related env var inherited from the spawning
+    // shell. If the harness is running inside another Claude Code session
+    // (VS Code extension, nested CLI, or another claudir), these vars point
+    // the subprocess at the WRONG claude binary (`CLAUDE_CODE_EXECPATH`),
+    // signal nested-session detection (`CLAUDECODE`), and confuse the auth
+    // lookup — producing the "Not logged in · Please run /login" synthetic
+    // loop that bricked Nova on 2026-04-21.
+    //
+    // Nova's subprocess should always look up its own keychain login via
+    // `/opt/homebrew/bin/claude`, uncontaminated by the parent session.
     cmd.env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT")
+        .env_remove("CLAUDE_CODE_EXECPATH")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1380,6 +1417,20 @@ fn wait_for_result(
     out_rx: &mut std::sync::mpsc::Receiver<OutputMessage>,
     mut inject: Option<(&std::sync::mpsc::Receiver<String>, &mut ChildStdin)>,
 ) -> Result<(Response, Option<String>, bool), String> {
+    // Guard against Claude Code's internal synthetic-response loop. Under
+    // certain `--json-schema` enforcement failures, Claude Code keeps emitting
+    // `{"model":"<synthetic>",...}` assistant messages + internal
+    // "Stop hook feedback: You MUST call the ..." user messages back-to-back
+    // WITHOUT ever emitting a {"type":"result"} — so this function would spin
+    // forever, spewing ~1000 log lines/sec and burning CPU. Nova's startup
+    // hit this consistently on 2026-04-21.
+    //
+    // Bail after N consecutive synthetic responses and return a fake Result
+    // so the caller's existing `is_synthetic` circuit breaker fires and
+    // resets the Claude session. Real responses reset the counter.
+    const SYNTHETIC_LOOP_LIMIT: usize = 5;
+    let mut synthetic_count: usize = 0;
+
     let mut compacted = false;
     let mut is_synthetic = false;
     // Feature 2: capture dropped text for the caller to act on.
@@ -1426,8 +1477,35 @@ fn wait_for_result(
                 if let Some(msg) = message {
                     // Synthetic model = session overflow signal
                     if msg.model.as_deref() == Some(SYNTHETIC_MODEL) {
-                        warn!("Synthetic model detected — session overflowed");
+                        synthetic_count += 1;
                         is_synthetic = true;
+                        warn!(
+                            "Synthetic model detected — session overflowed ({}/{})",
+                            synthetic_count, SYNTHETIC_LOOP_LIMIT
+                        );
+                        if synthetic_count >= SYNTHETIC_LOOP_LIMIT {
+                            warn!(
+                                "Claude Code stuck in synthetic loop — aborting turn, \
+                                 caller will reset the session"
+                            );
+                            return Ok((
+                                Response {
+                                    tool_calls: Vec::new(),
+                                    compacted: false,
+                                    action: "stop".to_string(),
+                                    reason: Some(
+                                        "synthetic-response loop detected".to_string(),
+                                    ),
+                                    sleep_ms: None,
+                                    dropped_text: None,
+                                },
+                                None,
+                                true,
+                            ));
+                        }
+                    } else {
+                        // Real response — reset the counter.
+                        synthetic_count = 0;
                     }
                     // Legacy compaction detection via context_management field
                     if let Some(ctx) = msg.context_management
