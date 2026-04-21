@@ -199,6 +199,10 @@ struct WorkerConfig {
     /// could read guardian.key off disk (0400 owned by harness UID = Bash
     /// UID) and mint its own HMAC, bypassing the guardian entirely.
     use_protected_write: bool,
+    /// Claude model to pass to `--model`. Values understood by Claude Code:
+    /// `opus`, `sonnet`, `haiku`, or a full model id. Defaults to `opus`
+    /// when None (per Nova's design — Nova is the CTO tier).
+    model: Option<String>,
 }
 
 impl ClaudeCode {
@@ -223,6 +227,7 @@ impl ClaudeCode {
         full_permissions: bool,
         tools_override: Option<String>,
         use_protected_write: bool,
+        model: Option<String>,
     ) -> Result<Self, String> {
         let (msg_tx, msg_rx) = mpsc::channel::<WorkerMessage>(32);
         let (resp_tx, resp_rx) = mpsc::channel::<Response>(32);
@@ -253,6 +258,7 @@ impl ClaudeCode {
             full_permissions,
             tools_override,
             use_protected_write,
+            model,
         };
 
         std::thread::spawn(move || {
@@ -776,6 +782,7 @@ fn setup_claude_process(
     full_permissions: bool,
     tools_override: &Option<String>,
     use_protected_write: bool,
+    model: Option<&str>,
     atomics: &WorkerAtomics,
 ) -> Result<
     (
@@ -792,6 +799,7 @@ fn setup_claude_process(
         full_permissions,
         tools_override,
         use_protected_write,
+        model,
     )?;
     let mut stdin = process.stdin.take().ok_or("No stdin")?;
     let stdout = process.stdout.take().ok_or("No stdout")?;
@@ -996,6 +1004,7 @@ fn worker_loop(
         cfg.full_permissions,
         &cfg.tools_override,
         cfg.use_protected_write,
+        cfg.model.as_deref(),
         &atomics,
     )?;
 
@@ -1051,6 +1060,7 @@ fn worker_loop(
                 cfg.full_permissions,
                 &cfg.tools_override,
                 cfg.use_protected_write,
+                cfg.model.as_deref(),
                 &atomics,
             ) {
                 Ok((new_proc, new_stdin, new_out_rx, new_stderr_buf)) => {
@@ -1165,6 +1175,7 @@ fn worker_loop(
                 cfg.full_permissions,
                 &cfg.tools_override,
                 cfg.use_protected_write,
+                cfg.model.as_deref(),
                 &atomics,
             ) {
                 Ok((new_proc, new_stdin, new_out_rx, new_stderr_buf)) => {
@@ -1253,6 +1264,7 @@ fn spawn_process_with_guardian(
     full_permissions: bool,
     tools_override: &Option<String>,
     use_protected_write: bool,
+    model: Option<&str>,
 ) -> Result<Child, String> {
     let schema: serde_json::Value =
         serde_json::from_str(TOOL_CALLS_SCHEMA).map_err(|e| format!("Bad schema: {}", e))?;
@@ -1261,9 +1273,13 @@ fn spawn_process_with_guardian(
 
     let tools_string = compute_allowed_tools(full_permissions, use_protected_write, tools_override);
     let tools: &str = &tools_string;
+    // Default to `opus` when unset. Nova is Tier-1 (CTO), and the original
+    // hardcoded `sonnet` ignored nova.json's `"model":"opus"` setting — a
+    // silent bug that downgraded every Tier-1 task.
+    let model_str = model.unwrap_or("opus");
     info!(
-        "Claude Code tools: {} (full_permissions={}, override={:?})",
-        tools, full_permissions, tools_override
+        "Claude Code tools: {} (full_permissions={}, override={:?}, model={})",
+        tools, full_permissions, tools_override, model_str
     );
 
     let mut cmd = Command::new("claude");
@@ -1275,7 +1291,7 @@ fn spawn_process_with_guardian(
         "stream-json",
         "--verbose",
         "--model",
-        "sonnet",
+        model_str,
         "--system-prompt",
         system_prompt,
         "--tools",

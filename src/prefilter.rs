@@ -77,6 +77,7 @@ mod tests {
             cognitive_interval_secs: 0,
             cognitive_enabled: false,
             dual_lane_enabled: false,
+            model: None,
             quick_lane_model: None,
             cognitive_token_budget: 500_000,
             guardian_enabled: false,
