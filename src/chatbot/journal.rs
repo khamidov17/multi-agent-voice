@@ -438,4 +438,69 @@ mod tests {
         assert!(timeline.contains("action: Did thing"));
         assert!(timeline.contains("observation: Saw result"));
     }
+
+    // ---- Phase 0 emit + truncation tests ----
+    //
+    // These live in the same test module (rather than a second one) to
+    // satisfy clippy::items_after_test_module. `test_conn()` above covers
+    // schema setup.
+
+    #[test]
+    fn emit_swallows_err_on_missing_schema() {
+        // No `journal` table → add_entry fails at INSERT → emit MUST swallow.
+        let conn = std::sync::Mutex::new(rusqlite::Connection::open_in_memory().unwrap());
+        emit(
+            &conn,
+            None,
+            ENTRY_TOOL_CALL,
+            "summary",
+            "detail",
+            &[],
+            &["test".to_string()],
+        );
+    }
+
+    #[test]
+    fn emit_writes_row_on_happy_path() {
+        let conn = test_conn();
+        emit(
+            &conn,
+            None,
+            ENTRY_GUARDIAN_ALLOW,
+            "guardian.allow: wrote 42 bytes",
+            "path=/opt/foo reason=test",
+            &[],
+            &["nova".to_string(), "/opt/foo".to_string()],
+        );
+        let rows: i64 = conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM journal", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn add_entry_utf8_safe_truncation_no_panic() {
+        let conn = test_conn();
+        // 600 emoji chars — would have panicked under the old
+        // `&detail[..byte_500]` slicing logic at a mid-codepoint byte.
+        let big: String = "🚀".repeat(600);
+        let result = add_entry(&conn, None, ENTRY_TOOL_CALL, "summary", &big, &[], &[]);
+        assert!(result.is_ok(), "utf-8 truncation must not panic or error");
+    }
+
+    #[test]
+    fn add_entry_maps_poisoned_mutex_to_err_not_panic() {
+        let conn = test_conn();
+        // Poison the mutex by panicking inside a lock.
+        let _ = std::panic::catch_unwind(|| {
+            let _g = conn.lock().unwrap();
+            panic!("intentional poison");
+        });
+        let result = add_entry(&conn, None, ENTRY_TOOL_CALL, "summary", "detail", &[], &[]);
+        assert!(result.is_err(), "poisoned mutex must produce Err, not panic");
+        // emit also must not panic on a poisoned mutex.
+        emit(&conn, None, ENTRY_TOOL_CALL, "s", "d", &[], &[]);
+    }
 }

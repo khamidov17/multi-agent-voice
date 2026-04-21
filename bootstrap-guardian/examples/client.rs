@@ -45,6 +45,7 @@ fn main() -> Result<()> {
         nonce,
         hmac,
         reason: Some(args.reason),
+        proto_version: Some(bootstrap_guardian::proto::PROTO_VERSION),
     };
 
     let mut stream = UnixStream::connect(cfg.socket_path())?;

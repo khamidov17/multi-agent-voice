@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Maximum bytes the guardian will read from a single request before giving
@@ -20,6 +21,42 @@ use std::time::Duration;
 /// after base64 overhead), small enough that a malicious stream cannot OOM
 /// the guardian before the read timeout fires.
 const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Maximum simultaneous connection handlers. Previously the accept loop
+/// did `std::thread::spawn` per connection with no cap — a local accept
+/// flood could exhaust ulimit -u and crash the guardian (plus any other
+/// process sharing the rlimit). /review adversarial flagged this.
+///
+/// 256 is comfortably above realistic harness concurrency (3 bots × dual-
+/// lane × ~4 in-flight writes ≈ 24) and small enough that hitting the cap
+/// is a clear signal something is wrong.
+const MAX_CONCURRENT_CONNECTIONS: usize = 256;
+
+/// Active connection counter guard. Increments on scope entry, decrements
+/// on drop. Used to cap accept-time concurrency without threading a
+/// semaphore through the handler.
+struct ConnCountGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl ConnCountGuard {
+    fn try_acquire(counter: &Arc<AtomicUsize>) -> Option<Self> {
+        let prev = counter.fetch_add(1, Ordering::AcqRel);
+        if prev >= MAX_CONCURRENT_CONNECTIONS {
+            counter.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(Self {
+            counter: Arc::clone(counter),
+        })
+    }
+}
+
+impl Drop for ConnCountGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 use crate::audit::{AuditEvent, AuditLog};
 use crate::auth::{compute_hmac, constant_time_eq, load_key, peer_uid};
@@ -53,19 +90,35 @@ impl Guardian {
     pub fn bind(&self) -> Result<UnixListener> {
         let sock = self.cfg.socket_path();
         // Remove stale socket from previous run.
-        // If the file exists and is NOT a socket, we refuse — someone replaced it.
+        // If the file exists and is NOT a socket OR is owned by a different
+        // user, we refuse. Previously we trusted any socket inode at the
+        // configured path; a local user running as any UID could create a
+        // socket there while the guardian is down, and on restart the
+        // guardian would `unlink` it blindly. /review security flagged.
         if sock.exists() {
             let meta = std::fs::metadata(&sock).context("stat existing socket")?;
             let file_type = meta.file_type();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::FileTypeExt;
+                use std::os::unix::fs::MetadataExt;
                 if !file_type.is_socket() {
                     anyhow::bail!(
                         "refusing to bind: {} exists and is not a socket (type: {:?}) — \
                          refusing to remove it. Investigate before starting.",
                         sock.display(),
                         file_type
+                    );
+                }
+                let our_uid = unsafe { libc::geteuid() };
+                if meta.uid() != our_uid {
+                    anyhow::bail!(
+                        "refusing to bind: stale socket at {} is owned by uid {} \
+                         but this process is uid {} — a different user placed a \
+                         socket at our expected path. Investigate before starting.",
+                        sock.display(),
+                        meta.uid(),
+                        our_uid
                     );
                 }
             }
@@ -91,14 +144,29 @@ impl Guardian {
             allowed_uids = ?self.cfg.allowed_uids,
             allowed_roots = ?self.cfg.allowed_roots,
             protected = ?self.cfg.protected_paths,
+            max_concurrent = MAX_CONCURRENT_CONNECTIONS,
             "guardian listening"
         );
 
+        let conn_counter: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    // Bounded concurrency: refuse the connection if
+                    // MAX_CONCURRENT_CONNECTIONS handlers are already
+                    // running. Previously unbounded — a local accept flood
+                    // could exhaust ulimit -u.
+                    let Some(guard) = ConnCountGuard::try_acquire(&conn_counter) else {
+                        tracing::warn!(
+                            max = MAX_CONCURRENT_CONNECTIONS,
+                            "guardian at connection cap — dropping new client"
+                        );
+                        drop(stream);
+                        continue;
+                    };
                     let me = Arc::clone(&self);
                     std::thread::spawn(move || {
+                        let _g = guard; // released when this thread exits
                         if let Err(e) = me.handle_connection(stream) {
                             tracing::warn!(err = %e, "guardian connection handler failed");
                         }
@@ -225,6 +293,32 @@ impl Guardian {
                 return Resp::err(ErrCode::Malformed, format!("json: {}", e));
             }
         };
+
+        // Wire-version gate: refuse clients NEWER than what we know how to
+        // interpret. Older or absent versions are accepted permissively so
+        // a guardian upgrade doesn't break outdated harnesses.
+        if let Some(client_v) = req.proto_version
+            && client_v > crate::proto::PROTO_VERSION
+        {
+            self.audit.write(&AuditEvent {
+                ts: AuditLog::now(),
+                uid,
+                op: op_tag(req.op),
+                path: req.path.clone(),
+                decision: "malformed",
+                bytes: None,
+                reason: req.reason.as_deref(),
+                err: Some("proto_version_newer"),
+            });
+            return Resp::err(
+                ErrCode::Malformed,
+                format!(
+                    "client proto_version={} but guardian supports up to {}",
+                    client_v,
+                    crate::proto::PROTO_VERSION
+                ),
+            );
+        }
 
         let bytes = match base64::Engine::decode(
             &base64::engine::general_purpose::STANDARD,

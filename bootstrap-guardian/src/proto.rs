@@ -5,8 +5,25 @@
 //! replies with `Resp`. The `hmac` field authenticates the triple (op, path,
 //! sha256(bytes), nonce) using a shared key stored at
 //! `<run_dir>/guardian.key` mode 0400.
+//!
+//! # Versioning
+//!
+//! [`PROTO_VERSION`] identifies the wire format. Requests SHOULD set
+//! `proto_version = Some(PROTO_VERSION)`; the guardian accepts the value as
+//! informational today and refuses with [`ErrCode::Malformed`] only if the
+//! client sends a version number that is NEWER than what this guardian
+//! understands. Older (or missing) versions are accepted permissively so
+//! existing clients are not broken by a guardian upgrade.
+//!
+//! Bump [`PROTO_VERSION`] any time the wire format changes in a way that
+//! would make an older client's request meaningless (new required field,
+//! changed signing formula, renamed Op variant).
 
 use serde::{Deserialize, Serialize};
+
+/// Current wire format version. Bump on any breaking change.
+/// Version 1: original format.
+pub const PROTO_VERSION: u32 = 1;
 
 /// One request from client to guardian.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +44,10 @@ pub struct Req {
     /// Optional but strongly encouraged; present in MCP tool signature.
     #[serde(default)]
     pub reason: Option<String>,
+    /// Wire-format version. Absent = "assume version 1"; guardian rejects
+    /// anything strictly newer than its own [`PROTO_VERSION`].
+    #[serde(default)]
+    pub proto_version: Option<u32>,
 }
 
 /// Operations the guardian understands.
@@ -66,9 +87,22 @@ pub struct Resp {
     /// Populated from the allowlist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alternative_roots: Option<Vec<String>>,
+    /// The guardian's wire-format version. Lets a cautious client detect
+    /// protocol drift even on successful responses.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proto_version: Option<u32>,
 }
 
-/// Rejection categories. Kept small and stable; add variants, don't reshape.
+/// Rejection categories.
+///
+/// **WIRE-STABLE CONTRACT:** every serde rename in this enum is part of the
+/// public wire format. Add variants freely; **never rename** an existing
+/// variant's serde name. If a rename is absolutely necessary, add a
+/// `#[serde(alias = "old_name")]` annotation so older responses still
+/// deserialize. The harness's typed `ClientErrCode` maps these by serde
+/// rename, so a silent rename breaks Nova's ability to branch on err codes
+/// (review maintainability + api-contract).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrCode {
@@ -105,6 +139,7 @@ impl Resp {
             message: None,
             suggested_action: None,
             alternative_roots: None,
+            proto_version: Some(PROTO_VERSION),
         }
     }
 
@@ -116,6 +151,7 @@ impl Resp {
             message: None,
             suggested_action: None,
             alternative_roots: None,
+            proto_version: Some(PROTO_VERSION),
         }
     }
 
@@ -132,6 +168,7 @@ impl Resp {
                     .into(),
             ),
             alternative_roots: Some(alternatives),
+            proto_version: Some(PROTO_VERSION),
         }
     }
 
@@ -194,6 +231,7 @@ impl Resp {
             message: Some(message.into()),
             suggested_action: suggested,
             alternative_roots: None,
+            proto_version: Some(PROTO_VERSION),
         }
     }
 }

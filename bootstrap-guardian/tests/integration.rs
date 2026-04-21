@@ -105,6 +105,7 @@ fn signed_write_req(key: &[u8], path: &Path, bytes: &[u8], nonce: u64, reason: &
         nonce,
         hmac,
         reason: Some(reason.into()),
+        proto_version: Some(bootstrap_guardian::proto::PROTO_VERSION),
     }
 }
 
@@ -257,6 +258,7 @@ fn ping_roundtrip_no_disk_write() {
         nonce,
         hmac,
         reason: Some("ping test".into()),
+        proto_version: Some(bootstrap_guardian::proto::PROTO_VERSION),
     };
     let resp = rpc(&sock, &req);
     assert!(resp.ok, "ping should succeed: {:?}", resp);
@@ -350,6 +352,7 @@ fn signed_override_req(key: &[u8], path: &Path, bytes: &[u8], nonce: u64, reason
         nonce,
         hmac,
         reason: Some(reason.into()),
+        proto_version: Some(bootstrap_guardian::proto::PROTO_VERSION),
     }
 }
 

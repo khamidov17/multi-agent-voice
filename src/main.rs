@@ -127,7 +127,30 @@ impl BotState {
                                     socket = %sock.display(),
                                     "Bootstrap guardian client ready"
                                 );
-                                Some(std::sync::Arc::new(c))
+                                let arc = std::sync::Arc::new(c);
+                                // Spawn a periodic watcher to catch key-mode drift
+                                // (e.g. a misapplied chmod flipping 0400 → 0644).
+                                // /review security — key is loaded once at startup
+                                // and never re-validated otherwise.
+                                {
+                                    let watched = std::sync::Arc::clone(&arc);
+                                    tokio::spawn(async move {
+                                        let mut interval = tokio::time::interval(
+                                            std::time::Duration::from_secs(5 * 60),
+                                        );
+                                        interval.tick().await; // skip immediate tick
+                                        loop {
+                                            interval.tick().await;
+                                            if let Err(e) = watched.recheck_key_mode() {
+                                                tracing::error!(
+                                                    err = %e,
+                                                    "guardian key mode drift detected"
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
+                                Some(arc)
                             }
                             Err(e) => {
                                 warn!(
@@ -585,6 +608,87 @@ async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)] // tests placed next to sweep_old_logs for locality
+mod sweep_tests {
+    use super::*;
+    use std::time::{Duration as StdDuration, SystemTime};
+
+    /// Build a temp log dir containing files with controlled mtimes:
+    /// `(name, age_in_days)`. Returns (temp_dir, created_paths).
+    fn mk_logs(files: &[(&str, u64)]) -> (tempfile::TempDir, Vec<std::path::PathBuf>) {
+        let td = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let mut paths = Vec::new();
+        for (name, age_days) in files {
+            let p = td.path().join(name);
+            std::fs::write(&p, b"x").unwrap();
+            let mtime = now - StdDuration::from_secs(age_days * 24 * 60 * 60);
+            // filetime crate would be cleaner; use `utimes` via libc directly.
+            let nanos = mtime
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let secs = (nanos / 1_000_000_000) as libc::time_t;
+            let usecs = ((nanos % 1_000_000_000) / 1_000) as libc::suseconds_t;
+            let tv = [
+                libc::timeval {
+                    tv_sec: secs,
+                    tv_usec: usecs,
+                },
+                libc::timeval {
+                    tv_sec: secs,
+                    tv_usec: usecs,
+                },
+            ];
+            let cpath = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+            unsafe {
+                libc::utimes(cpath.as_ptr(), tv.as_ptr());
+            }
+            paths.push(p);
+        }
+        (td, paths)
+    }
+
+    #[tokio::test]
+    async fn sweep_deletes_files_older_than_max_age() {
+        let (td, paths) = mk_logs(&[
+            ("claudir.log.2026-04-10", 15), // stale
+            ("claudir.log.2026-04-20", 2),  // fresh
+            ("claudir.log", 1),             // current
+        ]);
+        sweep_old_logs(td.path(), 7).await.unwrap();
+        assert!(!paths[0].exists(), "stale file must be deleted");
+        assert!(paths[1].exists(), "fresh file must remain");
+        assert!(paths[2].exists(), "current file must remain");
+    }
+
+    #[tokio::test]
+    async fn sweep_ignores_non_claudir_files() {
+        let (td, paths) = mk_logs(&[
+            ("claudir.log.old", 30),
+            ("other-app.log", 30), // not ours — must NOT delete
+        ]);
+        sweep_old_logs(td.path(), 7).await.unwrap();
+        assert!(!paths[0].exists());
+        assert!(paths[1].exists(), "foreign log must not be swept");
+    }
+
+    #[tokio::test]
+    async fn sweep_noop_on_empty_dir() {
+        let td = tempfile::tempdir().unwrap();
+        // Should not error.
+        sweep_old_logs(td.path(), 7).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_returns_err_on_missing_dir() {
+        let td = tempfile::tempdir().unwrap();
+        let missing = td.path().join("does_not_exist");
+        assert!(sweep_old_logs(&missing, 7).await.is_err());
+    }
 }
 
 #[tokio::main]

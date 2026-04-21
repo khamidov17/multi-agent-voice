@@ -142,6 +142,7 @@ fn status(cfg: &GuardianConfig) -> Result<()> {
         nonce,
         hmac,
         reason: Some("guardianctl status".into()),
+        proto_version: Some(bootstrap_guardian::proto::PROTO_VERSION),
     };
     let line = serde_json::to_string(&req)? + "\n";
     stream.write_all(line.as_bytes())?;
@@ -257,6 +258,7 @@ fn override_once(
         nonce,
         hmac,
         reason: Some(reason.to_string()),
+        proto_version: Some(bootstrap_guardian::proto::PROTO_VERSION),
     };
 
     let line = serde_json::to_string(&req)? + "\n";

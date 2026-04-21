@@ -1616,7 +1616,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "protected_write".to_string(),
-            description: "Phase 0 — write a file via the bootstrap guardian. Use this INSTEAD of the raw Edit/Write Claude Code tools when `nova_use_protected_write` is enabled. The guardian canonicalizes the path, verifies it lands inside an allowed root, and refuses any write to a protected path (the harness itself, launch configs, Cargo.toml). If denied, the response includes `alternative_roots` you may write to instead. Required only for Nova (Tier 1). Atlas/Sentinel should not call this — the harness rejects if the caller isn't full-permissions.".to_string(),
+            description: "Write a file via the bootstrap guardian. Prefer this over Edit/Write whenever it appears in your tool list — the guardian canonicalizes the path, verifies it lands inside an allowed root, and refuses writes to protected paths (the harness itself, launch configs, Cargo.toml). On denial, the response includes `alternative_roots` you may use instead plus a `suggested_action`. Response shape: `{ok: bool, written_bytes?: number, err_code?: string, message?: string, suggested_action?: string, alternative_roots?: string[]}`. Common err_codes: `denied` (protected path), `forbidden_tier` (bot isn't Tier 1), `guardian_disabled` (config off), `rpc_error` (guardian unreachable), `not_absolute` / `empty_path` / `empty_reason` / `content_too_large` (input validation). Required for Tier 1 bots; the harness rejects calls from other tiers.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
