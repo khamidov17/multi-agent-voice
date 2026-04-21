@@ -864,6 +864,34 @@ impl ChatbotEngine {
             msg.text.chars().take(50).collect::<String>()
         );
 
+        // Phase 2 — owner-reply parser. When the owner DMs the bot with
+        // `approve #42` or `reject #42 because X`, transition the fix
+        // plan's status WITHOUT needing Nova to parse it in an LLM turn.
+        // This is a thin glue layer so the approval loop works even when
+        // Nova is busy/sleeping. Only fires when:
+        //   - the sender is the configured owner
+        //   - the bot is Tier 1 (fix plans are Nova-only)
+        //   - the message starts with an approval keyword
+        // Non-matching messages fall through to the normal pending queue.
+        if self.config.full_permissions
+            && Some(msg.user_id) == self.config.owner_user_id
+        {
+            match crate::chatbot::fix_plan_reply::parse_owner_reply(&msg.text) {
+                crate::chatbot::fix_plan_reply::OwnerReply::None => {}
+                reply => {
+                    crate::chatbot::fix_plan_reply::apply_owner_reply(
+                        &self.config,
+                        &self.telegram,
+                        msg.chat_id,
+                        reply,
+                    )
+                    .await;
+                    // Fall through — Nova still sees the message in her
+                    // pending queue so she can acknowledge in-conversation.
+                }
+            }
+        }
+
         // Store in context and message store
         {
             let mut ctx = self.context.lock().await;
