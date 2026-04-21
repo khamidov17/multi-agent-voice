@@ -132,6 +132,13 @@ pub struct ChatbotConfig {
     /// that /review performance+adversarial flagged as HC2. When `None`,
     /// hot-path emissions fall back to synchronous (e.g., in tests).
     pub journal_writer: Option<Arc<crate::chatbot::journal::JournalWriter>>,
+    /// Phase 1 — shared cross-bot alerts writer. When present,
+    /// Atlas/Sentinel/Nova watchdogs emit `BugAlert` rows that Nova later
+    /// reads via `read_alerts` and consolidates into a triage report.
+    /// Shared across all three bot processes through the
+    /// `data/shared/bug_alerts.db` SQLite file. `None` means Phase 1
+    /// is disabled (e.g., in unit tests or older bot configs).
+    pub alerts_writer: Option<Arc<crate::chatbot::alerts::AlertsWriter>>,
 }
 
 impl Default for ChatbotConfig {
@@ -161,6 +168,7 @@ impl Default for ChatbotConfig {
             guardian_client: None,
             nova_use_protected_write: false,
             journal_writer: None,
+            alerts_writer: None,
         }
     }
 }
@@ -541,11 +549,43 @@ impl ChatbotEngine {
                 self.config.bot_name.clone(),
                 self.telegram.bot_handle(),
                 cc_pid,
-                cc_heartbeat,
+                cc_heartbeat.clone(),
                 self.config.owner_user_id,
                 self.config.shared_bot_messages_db.clone(),
             );
             info!("Health monitor started for {}", self.config.bot_name);
+
+            // Phase 1 — heartbeat-gap watchdog. Runs alongside the health
+            // monitor but writes structured `BugAlert` rows to the shared
+            // alerts DB instead of ad-hoc logs. When the gap exceeds the
+            // design-doc threshold (30s), Nova picks it up at the next
+            // triage pass.
+            if self.config.alerts_writer.is_some() {
+                crate::chatbot::detectors::spawn_heartbeat_watchdog(
+                    self.config.bot_name.clone(),
+                    cc_heartbeat,
+                    self.config.alerts_writer.clone(),
+                    crate::chatbot::detectors::DEFAULT_HEARTBEAT_GAP_THRESHOLD_SECS,
+                    crate::chatbot::detectors::DEFAULT_HEARTBEAT_POLL_INTERVAL_SECS,
+                );
+            }
+
+            // Phase 1 — journal-error scanner. Polls the per-bot journal
+            // for error-shaped rows and emits alerts so the owner sees
+            // failures that would otherwise only live in SQLite. Uses a
+            // dedicated read connection so we don't contend on the
+            // engine's journal mutex.
+            if self.config.alerts_writer.is_some()
+                && let Some(ref data_dir) = self.config.data_dir
+            {
+                let db_path = data_dir.join("database.db");
+                crate::chatbot::detectors::spawn_journal_scanner(
+                    self.config.bot_name.clone(),
+                    db_path,
+                    self.config.alerts_writer.clone(),
+                    crate::chatbot::detectors::DEFAULT_JOURNAL_SCAN_INTERVAL_SECS,
+                );
+            }
         }
 
         // Start metrics flush task (every 5 minutes)

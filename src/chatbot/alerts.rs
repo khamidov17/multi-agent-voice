@@ -361,6 +361,14 @@ pub struct AlertsWriter {
     tx: mpsc::Sender<BugAlert>,
 }
 
+impl std::fmt::Debug for AlertsWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AlertsWriter")
+            .field("capacity_remaining", &self.tx.capacity())
+            .finish()
+    }
+}
+
 impl AlertsWriter {
     /// Open the shared alerts DB at the given path, run `init_schema`,
     /// then spawn the drain task. The caller keeps the returned

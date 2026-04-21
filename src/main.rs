@@ -234,6 +234,27 @@ impl BotState {
                         }
                     }
                 },
+                alerts_writer: {
+                    // Phase 1 cross-bot alerts. Shared SQLite at
+                    // `data/shared/bug_alerts.db` — all three bots write
+                    // to the same file. Spawning the writer is opportunistic:
+                    // if it fails, Phase 1 detection just no-ops (detectors
+                    // call `.emit()` through the `MaybeEmit` trait on the
+                    // Option).
+                    let alerts_path =
+                        crate::chatbot::alerts::shared_alerts_db_path(&config.data_dir);
+                    match crate::chatbot::alerts::AlertsWriter::spawn_with_path(&alerts_path) {
+                        Ok(w) => Some(std::sync::Arc::new(w)),
+                        Err(e) => {
+                            warn!(
+                                path = %alerts_path.display(),
+                                err = %e,
+                                "alerts writer failed to open; Phase 1 detection disabled for this process"
+                            );
+                            None
+                        }
+                    }
+                },
             };
 
             // Fetch available TTS voices if endpoint configured
