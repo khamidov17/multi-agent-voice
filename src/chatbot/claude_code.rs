@@ -550,6 +550,9 @@ struct RawToolCall {
     description: Option<String>,
     #[serde(default)]
     severity: Option<String>,
+    // protected_write field (path + content reuse memory-tool fields above)
+    #[serde(default)]
+    reason: Option<String>,
     // send_voice fields
     #[serde(default)]
     voice: Option<String>,
@@ -740,8 +743,13 @@ impl RawToolCall {
                     severity: self.severity.clone(),
                 }),
                 "done" => Ok(ToolCall::Done),
+                "protected_write" => Ok(ToolCall::ProtectedWrite {
+                    path: self.path.clone().ok_or("protected_write requires path")?,
+                    content: self.content.clone().ok_or("protected_write requires content")?,
+                    reason: self.reason.clone().ok_or("protected_write requires reason")?,
+                }),
                 "WebSearch" => Err("WebSearch is a Claude Code built-in tool. Use it BEFORE outputting tool_calls (it runs automatically when you search). Don't include it in the tool_calls array.".to_string()),
-                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, fetch_url, send_music, edit_message, send_poll, unban_user, set_reminder, list_reminders, cancel_reminder, yandex_geocode, yandex_map, now, report_bug, done", self.tool)),
+                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, fetch_url, send_music, edit_message, send_poll, unban_user, set_reminder, list_reminders, cancel_reminder, yandex_geocode, yandex_map, now, report_bug, done, protected_write", self.tool)),
             }
         };
 
