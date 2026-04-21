@@ -205,6 +205,7 @@ impl BotState {
                 cognitive_interval_secs: config.cognitive_interval_secs,
                 cognitive_enabled: config.cognitive_enabled,
                 dual_lane_enabled: config.dual_lane_enabled,
+                model: config.model.clone(),
                 quick_lane_model: config.quick_lane_model.clone(),
                 cognitive_daily_token_budget: config.cognitive_token_budget,
                 guardian_client,
@@ -305,6 +306,7 @@ impl BotState {
                 config.full_permissions,
                 config.tools_override.clone(),
                 config.nova_use_protected_write,
+                config.model.clone(),
             ) {
                 Ok(cc) => cc,
                 Err(e) => {

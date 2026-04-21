@@ -109,6 +109,9 @@ pub struct ChatbotConfig {
     pub cognitive_enabled: bool,
     /// Enable dual-lane processing (deep work + quick response).
     pub dual_lane_enabled: bool,
+    /// Deep-lane Claude model (value for `claude --model`). None → default
+    /// at the spawn layer (currently `opus`). Set per-bot in `*.json`.
+    pub model: Option<String>,
     /// Model override for the quick response lane.
     pub quick_lane_model: Option<String>,
     /// Daily token budget for cognitive loop (default 500_000).
@@ -152,6 +155,7 @@ impl Default for ChatbotConfig {
             cognitive_interval_secs: 300,
             cognitive_enabled: true,
             dual_lane_enabled: true,
+            model: None,
             quick_lane_model: None,
             cognitive_daily_token_budget: 500_000,
             guardian_client: None,
@@ -719,6 +723,7 @@ impl ChatbotEngine {
             false, // Never full_permissions
             quick_tools,
             false, // No protected_write in quick lane
+            self.config.quick_lane_model.clone(),
         ) {
             Ok(cc) => Arc::new(Mutex::new(cc)),
             Err(e) => {

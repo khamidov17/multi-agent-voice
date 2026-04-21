@@ -86,6 +86,13 @@ struct ConfigFile {
     /// Enable dual-lane processing (deep work + quick response). Default: true.
     #[serde(default = "default_true_config")]
     dual_lane_enabled: bool,
+    /// Deep-lane Claude model to pass to `claude --model`. Values Claude Code
+    /// understands: `opus`, `sonnet`, `haiku`, or a full model id. Defaults
+    /// to None here (plumbed through to `start_with_guardian`, which falls
+    /// back to `opus`). nova.json sets `"model":"opus"`; prior to 2026-04-21
+    /// this field was silently dropped because the struct didn't declare it.
+    #[serde(default)]
+    model: Option<String>,
     /// Model override for the quick response lane (e.g. "claude-haiku-4-5").
     /// When None, the quick lane uses the same model as the deep lane.
     #[serde(default)]
@@ -195,6 +202,8 @@ pub struct Config {
     pub cognitive_enabled: bool,
     /// Enable dual-lane processing (deep work + quick response).
     pub dual_lane_enabled: bool,
+    /// Deep-lane Claude model (value for `claude --model`).
+    pub model: Option<String>,
     /// Model override for the quick response lane.
     pub quick_lane_model: Option<String>,
     /// Daily token budget for cognitive loop.
@@ -294,6 +303,7 @@ impl Config {
             }),
             cognitive_enabled: file.cognitive_enabled,
             dual_lane_enabled: file.dual_lane_enabled,
+            model: file.model,
             quick_lane_model: file.quick_lane_model,
             cognitive_token_budget: file.cognitive_token_budget,
             guardian_enabled: file.guardian_enabled,
