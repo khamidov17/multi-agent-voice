@@ -13,6 +13,7 @@ pub mod document;
 pub mod dual_lane;
 pub mod engine;
 pub mod event_bus;
+pub mod fix_plan_reply;
 pub mod fix_plans;
 pub mod format;
 pub mod gemini;

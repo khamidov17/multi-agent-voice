@@ -27,15 +27,26 @@ use crate::chatbot::metrics::MetricsCollector;
 const MODES: &[(&str, &str)] = &[
     (
         "MONITOR",
-        "Phase 1 triage pass. Call `read_alerts` (no args) to see what the heartbeat watchdog \
-      and journal scanner have detected since the last cognitive tick. For each open alert: \
-      - If critical or high AND owner would want to know, call `send_triage_report` with a \
-        short preamble summarizing what you found and set `auto_mark_triaged=true`. \
-      - If it's a benign/expected event (spurious gap under load, already-handled restart), \
-        call `mark_triaged` with `alert_ids` and a `note` explaining why. \
-      - If you're not sure, leave it open for the next tick. \
-      Keep preambles concrete (what broke, when, how bad) — no \"looking into it\" filler. \
-      Also: check data/shared/bot_messages.db for any unanswered messages or failed handoffs. \
+        "Phase 1+2 triage + planning pass. \
+      STEP 1 — Alerts: call `read_alerts` (no args). For each open alert: \
+      - Critical/high + owner would want to know → `send_triage_report` with a concise \
+        preamble and `auto_mark_triaged=true`. \
+      - Benign (spurious gap, already-handled restart) → `mark_triaged` with a `note`. \
+      - Not sure → leave for next tick. \
+      STEP 2 — Fix plans: call `list_fix_plans` with status=\"draft\" and status=\"sent\". \
+      - For every CRITICAL alert that does NOT have an open plan (draft or sent), draft one via \
+        `draft_fix_plan`. Reference the alert's evidence in root_cause. Be concrete about \
+        steps — list the actual files/functions, not 'investigate'. Pick low-risk wording if \
+        the change really is small (e.g. detector threshold tuning). \
+      - Once drafted, `send_fix_plan_to_owner` with a 1-2 sentence preamble explaining WHY \
+        you drafted it. Draft→sent transitions automatically on send. \
+      - Do NOT draft plans for medium/low alerts unless they're recurring (count > 5). \
+      - Do NOT draft a plan if there's already an 'approved' plan for that alert — Phase 3 \
+        will ship it; you're done with that alert. \
+      STEP 3 — Owner replies: you'll see messages like `approve #42` / `reject #42 because X`. \
+      The harness auto-transitions the plan status when these arrive; you don't need to handle \
+      them in the cognitive loop. \
+      Also: check data/shared/bot_messages.db for unanswered handoffs. \
       If all clear, stop quickly.",
     ),
     (
