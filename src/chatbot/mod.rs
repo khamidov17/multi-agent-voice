@@ -17,6 +17,7 @@ pub mod fix_plan_reply;
 pub mod fix_plans;
 pub mod format;
 pub mod gemini;
+pub mod gh_cli;
 pub mod git_ops;
 pub mod worktree;
 pub mod health;
