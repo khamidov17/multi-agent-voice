@@ -27,7 +27,7 @@ use crate::chatbot::metrics::MetricsCollector;
 const MODES: &[(&str, &str)] = &[
     (
         "MONITOR",
-        "Review recent activity. Check data/{bot}/logs/claudir.log for errors or warnings in the last hour. \
+        "Review recent activity. Check data/{bot}/logs/trio.log for errors or warnings in the last hour. \
       Check data/shared/bot_messages.db for any unanswered messages or failed handoffs. \
       Check heartbeats table — are all peer bots alive and responsive? \
       If you find anomalies, report them to the group. If all clear, stop quickly.",

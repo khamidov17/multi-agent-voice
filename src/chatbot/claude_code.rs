@@ -23,7 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use super::tools::ToolCall;
 
-/// RAII guard for Claude Code child process (claudir architecture).
+/// RAII guard for Claude Code child process (trio architecture).
 /// Ensures wait() is always called on the child process, preventing zombies.
 #[allow(dead_code)]
 struct ChildGuard {
@@ -139,7 +139,7 @@ pub struct Response {
     pub compacted: bool,
     /// Control action from structured output: "stop", "sleep", or "heartbeat"
     pub action: String,
-    /// Reason for stopping (required by claudir architecture)
+    /// Reason for stopping (required by trio architecture)
     pub reason: Option<String>,
     /// Sleep duration in ms (when action = "sleep")
     pub sleep_ms: Option<u64>,
@@ -1360,7 +1360,7 @@ fn spawn_process_with_guardian(
 
     // Strip every Claude-Code-related env var inherited from the spawning
     // shell. If the harness is running inside another Claude Code session
-    // (VS Code extension, nested CLI, or another claudir), these vars point
+    // (VS Code extension, nested CLI, or another trio), these vars point
     // the subprocess at the WRONG claude binary (`CLAUDE_CODE_EXECPATH`),
     // signal nested-session detection (`CLAUDECODE`), and confuse the auth
     // lookup — producing the "Not logged in · Please run /login" synthetic
@@ -1554,7 +1554,7 @@ fn wait_for_result(
                 session_id,
                 result: result_text,
             } => {
-                // DROPPED TEXT DETECTION (claudir architecture):
+                // DROPPED TEXT DETECTION (trio architecture):
                 // If Claude output text directly instead of calling send_message,
                 // log it and store it so the worker can inject a correction next turn.
                 if let Some(ref text) = result_text {

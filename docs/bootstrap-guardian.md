@@ -56,7 +56,7 @@ Nova (Tier 1 CTO bot) has `Edit, Write, Bash` in its Claude Code tool string. Wh
 
 ## Config
 
-A single JSON file with two top-level blocks — `dev` and `prod`. The guardian reads `CLAUDIR_ENV` (default `prod`) to pick one.
+A single JSON file with two top-level blocks — `dev` and `prod`. The guardian reads `TRIO_ENV` (default `prod`) to pick one.
 
 Each block has:
 
@@ -76,10 +76,10 @@ See `bootstrap-guardian/deploy/guardian.example.json` for a starting point.
 
 ```bash
 # macOS
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claudir.bootstrap-guardian.plist
-launchctl kickstart gui/$(id -u)/com.claudir.bootstrap-guardian
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trio.bootstrap-guardian.plist
+launchctl kickstart gui/$(id -u)/com.trio.bootstrap-guardian
 # stop
-launchctl bootout gui/$(id -u)/com.claudir.bootstrap-guardian
+launchctl bootout gui/$(id -u)/com.trio.bootstrap-guardian
 
 # Linux
 sudo systemctl enable --now bootstrap-guardian
@@ -90,7 +90,7 @@ sudo systemctl stop bootstrap-guardian
 
 ```bash
 ./bootstrap-guardian/target/release/guardianctl \
-  --config /opt/claudir/guardian.json status
+  --config /opt/trio/guardian.json status
 ```
 
 The `status` subcommand performs a full signed Ping RPC, so a green status means the socket is reachable AND the key matches AND the guardian is accepting requests.
@@ -116,14 +116,14 @@ guardianctl resume
 If `guardian.key` may be compromised:
 
 1. `systemctl stop bootstrap-guardian` (or launchctl bootout)
-2. `head -c 64 /dev/urandom > /opt/claudir/run/guardian.key && chmod 0400 /opt/claudir/run/guardian.key`
+2. `head -c 64 /dev/urandom > /opt/trio/run/guardian.key && chmod 0400 /opt/trio/run/guardian.key`
 3. Restart guardian
 4. Reload the harness so it re-reads the key (tracked as a TODO — harness integration pending)
 
 ### Reading the audit log
 
 ```bash
-tail -n 100 /opt/claudir/run/guardian.audit.jsonl | jq .
+tail -n 100 /opt/trio/run/guardian.audit.jsonl | jq .
 ```
 
 One line per decision. Fields: `ts`, `uid`, `op`, `path` (canonical when resolved), `decision` (`allow` / `denied_protected` / `denied_outside` / `bad_hmac` / `replay` / `uid_mismatch` / `paused` / `malformed` / `io_error` / `traversal`), `bytes`, `reason`, `err`.
@@ -135,17 +135,17 @@ A noisy `denied_protected` cluster is Nova trying to touch things it shouldn't �
 | Mode | Symptom | Response |
 |---|---|---|
 | Guardian crashes | Socket connection refused | launchd/systemd restarts with 5s backoff. If it crashes repeatedly, check `stderr` — likely config error (paths don't exist, key mode wrong). |
-| Key file permissions drift | Guardian refuses to start with `mode 0NNN; must be 0400` | `chmod 0400 /opt/claudir/run/guardian.key`. |
+| Key file permissions drift | Guardian refuses to start with `mode 0NNN; must be 0400` | `chmod 0400 /opt/trio/run/guardian.key`. |
 | Harness cannot reach socket | `protected_write` returns `IpcTimeout` | Check guardian is running + `run_dir` is 0700 + socket is 0600 + owned by guardian UID. |
 | Nonce drift after guardian DB loss | `ReplayDetected` on every request | Only the harness should care — harness-side nonce counter must be stored persistently. Restart both. Tracked in TODOS.md. |
 | Disk full | `IoError` with `ENOSPC` | Free disk. No automatic recovery. |
-| iCloud path on macOS | Various unpredictable failures | Run `run_dir` off iCloud. The bootstrap script does this by default (`~/claudir-dev/run` for dev). |
+| iCloud path on macOS | Various unpredictable failures | Run `run_dir` off iCloud. The bootstrap script does this by default (`~/trio-dev/run` for dev). |
 
 ## What the guardian does NOT protect against
 
 - **OS root.** Anyone with root (`sudo`) can edit any file regardless of the guardian.
 - **Physical access.** Guardian runs only while online; offline file edits bypass everything.
-- **Nova acquiring guardian UID.** OS-level user separation matters — run guardian as `claudir-guardian`, harness as `claudir-harness`.
+- **Nova acquiring guardian UID.** OS-level user separation matters — run guardian as `trio-guardian`, harness as `trio-harness`.
 - **Nova shelling out.** If the MCP tool architecture lets Nova run `sh` (via the harness `Bash` tool), Nova can `rm -rf` guardian files. The next Phase 0 slice removes `Edit`, `Write`, AND `Bash` from Nova's CC tool string; the guardian only addresses `Edit`/`Write`. `Bash` removal is a separate (important) policy choice tracked in the design doc.
 
 ## Wire format reference (for alternative clients)

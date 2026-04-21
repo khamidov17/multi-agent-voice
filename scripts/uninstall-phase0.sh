@@ -6,22 +6,22 @@
 
 set -euo pipefail
 
-env_name="${CLAUDIR_ENV:-dev}"
+env_name="${TRIO_ENV:-dev}"
 run_dir_default() {
   if [ "$env_name" = "dev" ]; then
-    echo "$HOME/claudir-dev/run"
+    echo "$HOME/trio-dev/run"
   else
-    echo "/opt/claudir/run"
+    echo "/opt/trio/run"
   fi
 }
-run_dir="${CLAUDIR_RUN_DIR:-$(run_dir_default)}"
+run_dir="${TRIO_RUN_DIR:-$(run_dir_default)}"
 
 os="$(uname -s)"
 if [ "$os" = "Darwin" ]; then
-  plist="$HOME/Library/LaunchAgents/com.claudir.bootstrap-guardian.plist"
+  plist="$HOME/Library/LaunchAgents/com.trio.bootstrap-guardian.plist"
   if [ -f "$plist" ]; then
-    echo "[STOP] launchctl bootout gui/\$(id -u)/com.claudir.bootstrap-guardian"
-    launchctl bootout "gui/$(id -u)/com.claudir.bootstrap-guardian" 2>/dev/null || true
+    echo "[STOP] launchctl bootout gui/\$(id -u)/com.trio.bootstrap-guardian"
+    launchctl bootout "gui/$(id -u)/com.trio.bootstrap-guardian" 2>/dev/null || true
     echo "[RM] $plist"
     rm -f "$plist"
   else

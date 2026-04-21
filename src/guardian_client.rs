@@ -3,10 +3,10 @@
 //! Usage from the harness:
 //! ```no_run
 //! use std::path::Path;
-//! # use claudir::guardian_client::{GuardianClient, WriteResult};
+//! # use trio::guardian_client::{GuardianClient, WriteResult};
 //! let client = GuardianClient::new(
-//!     Path::new("/opt/claudir/run/bootstrap-guardian.sock"),
-//!     Path::new("/opt/claudir/run/guardian.key"),
+//!     Path::new("/opt/trio/run/bootstrap-guardian.sock"),
+//!     Path::new("/opt/trio/run/guardian.key"),
 //! ).expect("guardian client");
 //! let result = client.protected_write(
 //!     "/opt/nova/data/memories/note.md",
@@ -22,7 +22,7 @@
 //!
 //! The MCP tool that Nova calls (`protected_write(path, content, reason)`)
 //! wraps this client. When/if Nova's Claude Code tool string eventually
-//! drops `Edit, Write`, Nova's only path to writing files in the Claudir
+//! drops `Edit, Write`, Nova's only path to writing files in the Trio
 //! tree will be this tool, which goes through the guardian.
 //!
 //! **Status:** the library is complete. The MCP tool wiring in

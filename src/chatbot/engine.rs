@@ -1191,7 +1191,7 @@ async fn process_messages(
             .iter()
             .any(|tc| matches!(tc.call, ToolCall::Done));
 
-        // ── Control action handling (claudir architecture) ──────────────
+        // ── Control action handling (trio architecture) ──────────────
 
         match action {
             // HEARTBEAT: Claude is still working, continue the loop

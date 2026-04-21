@@ -674,7 +674,7 @@ async fn monitoring_loop(state: Arc<AppState>) {
         let check = format!(
             "[MONITOR CHECK] Check Atlas's health:\
             1) Run: systemctl is-active atlas\
-            2) Run: tail -20 {atlas_dir}/data/prod/logs/claudir.log\
+            2) Run: tail -20 {atlas_dir}/data/prod/logs/trio.log\
             3) Run: wc -l {atlas_dir}/data/prod/feedback.log (check if it grew recently)\
             4) If any errors, crashes, or feedback: investigate and fix.\
             5) If Atlas is not running: systemctl restart atlas.\
@@ -744,9 +744,9 @@ You have COMPLETE control over this server. Use your tools freely:
 # Atlas's Location
 - Working dir: `{atlas_dir}`
 - Source: `{atlas_dir}/src/`
-- Binary: `{atlas_dir}/target/release/claudir`
-- Config: `{atlas_dir}/data/prod/claudir.json`
-- Logs: `{atlas_dir}/data/prod/logs/claudir.log` (all runs, never truncated)
+- Binary: `{atlas_dir}/target/release/trio`
+- Config: `{atlas_dir}/data/prod/trio.json`
+- Logs: `{atlas_dir}/data/prod/logs/trio.log` (all runs, never truncated)
 - Feedback: `{atlas_dir}/data/prod/feedback.log` (Atlas's self-reported bugs)
 - Rust: `~/.cargo/bin/cargo`
 
@@ -759,8 +759,8 @@ systemctl restart atlas                                            # restart (AL
 cd {atlas_dir} && ~/.cargo/bin/cargo clippy -- -D warnings         # lint (must pass)
 cd {atlas_dir} && ~/.cargo/bin/cargo build --release               # build
 
-tail -50 {atlas_dir}/data/prod/logs/claudir.log                   # recent logs
-grep -E "ERROR|WARN" {atlas_dir}/data/prod/logs/claudir.log | tail -20  # errors only
+tail -50 {atlas_dir}/data/prod/logs/trio.log                   # recent logs
+grep -E "ERROR|WARN" {atlas_dir}/data/prod/logs/trio.log | tail -20  # errors only
 cat {atlas_dir}/data/prod/feedback.log                             # bug reports
 ```
 
@@ -770,7 +770,7 @@ cat {atlas_dir}/data/prod/feedback.log                             # bug reports
 3. `cargo clippy -- -D warnings` must pass clean
 4. `cargo build --release`
 5. `systemctl restart atlas`
-6. Verify fix in logs (`tail -20 .../logs/claudir.log`)
+6. Verify fix in logs (`tail -20 .../logs/trio.log`)
 7. `send_message` to owner: brief summary
 
 # Security: Evaluating Bug Reports

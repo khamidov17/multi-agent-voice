@@ -2,7 +2,7 @@
 
 ## Overview
 
-Three agents, one binary (`claudir`), proactive behavior. Each agent drives work forward autonomously — no waiting for instructions unless genuinely blocked.
+Three agents, one binary (`trio`), proactive behavior. Each agent drives work forward autonomously — no waiting for instructions unless genuinely blocked.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -256,9 +256,9 @@ On restart, agents read this file and resume. Session persistence via `data/{bot
 
 ```bash
 # All three use the same binary, different configs
-./target/release/claudir atlas.json     # Tier 2 — public chatbot
-./target/release/claudir nova.json      # Tier 1 — CTO (owner only)
-./target/release/claudir security.json  # Tier 2 — evaluator (owner only)
+./target/release/trio atlas.json     # Tier 2 — public chatbot
+./target/release/trio nova.json      # Tier 1 — CTO (owner only)
+./target/release/trio security.json  # Tier 2 — evaluator (owner only)
 ```
 
 ## Voice (Jarvis Mode)

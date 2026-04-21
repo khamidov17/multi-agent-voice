@@ -2,7 +2,7 @@
 //! adopt in the next Phase 0 slice. Not production code; educational.
 //!
 //! Run: `cargo run -p bootstrap-guardian --example client -- \
-//!   --config /opt/claudir/guardian.json \
+//!   --config /opt/trio/guardian.json \
 //!   --path /opt/nova/data/foo.txt \
 //!   --content 'hello, world' \
 //!   --reason 'smoke-test'`
@@ -18,7 +18,7 @@ use std::time::Duration;
 
 #[derive(Parser, Debug)]
 struct Cli {
-    #[arg(short, long, default_value = "/opt/claudir/guardian.json")]
+    #[arg(short, long, default_value = "/opt/trio/guardian.json")]
     config: PathBuf,
     #[arg(long)]
     path: String,

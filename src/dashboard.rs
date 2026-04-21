@@ -1,4 +1,4 @@
-//! Web dashboard for the Claudir multi-agent system.
+//! Web dashboard for the Trio multi-agent system.
 //!
 //! Provides a Trello-like task board, Telegram-style messaging UI, and agent
 //! status monitoring — all behind password authentication.
@@ -48,7 +48,7 @@ pub struct DashboardState {
 
 fn derive_secret(bot_token: &str) -> Vec<u8> {
     let mut mac =
-        HmacSha256::new_from_slice(b"claudir-dashboard-auth").expect("HMAC key length is valid");
+        HmacSha256::new_from_slice(b"trio-dashboard-auth").expect("HMAC key length is valid");
     mac.update(bot_token.as_bytes());
     mac.finalize().into_bytes().to_vec()
 }

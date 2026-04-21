@@ -2,7 +2,7 @@
 //!
 //! Two environments — dev (local macOS/iCloud) and prod (Linux server at
 //! /opt/nova/). A single JSON file with per-env blocks; guardian picks the
-//! right one from `CLAUDIR_ENV` env var (default: `prod`).
+//! right one from `TRIO_ENV` env var (default: `prod`).
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -38,10 +38,10 @@ impl GuardianConfig {
         let envs: std::collections::HashMap<String, GuardianConfig> = serde_json::from_str(&raw)
             .with_context(|| format!("parsing config file {}", path.display()))?;
 
-        let env = std::env::var("CLAUDIR_ENV").unwrap_or_else(|_| "prod".to_string());
+        let env = std::env::var("TRIO_ENV").unwrap_or_else(|_| "prod".to_string());
         envs.get(&env)
             .cloned()
-            .ok_or_else(|| anyhow!("config has no block for CLAUDIR_ENV=\"{}\"", env))
+            .ok_or_else(|| anyhow!("config has no block for TRIO_ENV=\"{}\"", env))
     }
 
     /// Minimal config for the integration-test harness.

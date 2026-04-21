@@ -1,10 +1,10 @@
 # bootstrap-guardian
 
-Write-guarding process for Claudir. Prevents Nova from modifying its own harness, wrapper, or launch config, even when it has Claude Code `Edit`/`Write` tools.
+Write-guarding process for Trio. Prevents Nova from modifying its own harness, wrapper, or launch config, even when it has Claude Code `Edit`/`Write` tools.
 
 ## Why this exists
 
-Claudir's Phase 0 plan introduced a bootstrap invariant: Nova must not be able to brick its own harness at 3am. The CEO/Eng/DX review found that a software-only guardian is bypassable as long as Nova's Claude Code subprocess has direct `Edit`/`Write` tools, because those call `fs::write` in the kernel and never cross any IPC boundary the guardian can see.
+Trio's Phase 0 plan introduced a bootstrap invariant: Nova must not be able to brick its own harness at 3am. The CEO/Eng/DX review found that a software-only guardian is bypassable as long as Nova's Claude Code subprocess has direct `Edit`/`Write` tools, because those call `fs::write` in the kernel and never cross any IPC boundary the guardian can see.
 
 This crate is the first of two halves of the fix:
 
@@ -35,20 +35,20 @@ examples/
   client.rs      # reference client shape for the future MCP shim
 deploy/
   bootstrap-guardian.service.tmpl       # systemd (Linux)
-  com.claudir.bootstrap-guardian.plist.tmpl  # launchd (macOS)
+  com.trio.bootstrap-guardian.plist.tmpl  # launchd (macOS)
   guardian.example.json                 # per-env config template
 ```
 
 ## Quick start
 
 ```bash
-# From the Claudir repo root:
+# From the Trio repo root:
 ./scripts/bootstrap-phase0.sh
 # Edit the generated <run_dir>/../guardian.json to match your env.
 # Then load the launchd plist (macOS) or enable the systemd unit (Linux) as prompted.
 # Verify:
 ./bootstrap-guardian/target/release/guardianctl \
-  --config /opt/claudir/guardian.json status
+  --config /opt/trio/guardian.json status
 ```
 
 ## Wire protocol
@@ -82,7 +82,7 @@ Response (deny):
   "err_code": "denied",
   "message": "path /opt/nova/src/main.rs is in a protected root",
   "suggested_action": "Pick a path inside one of `alternative_roots`. ...",
-  "alternative_roots": ["/opt/nova/data", "/opt/nova/logs", "/tmp/claudir-scratch"]
+  "alternative_roots": ["/opt/nova/data", "/opt/nova/logs", "/tmp/trio-scratch"]
 }
 ```
 

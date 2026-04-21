@@ -8,18 +8,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Write-guarding process that prevents Nova from modifying its own harness
-/// or wrapper files at 3am. Runs as a sibling to the Claudir harness,
+/// or wrapper files at 3am. Runs as a sibling to the Trio harness,
 /// accepts UDS requests, authenticates via HMAC, and enforces a path
 /// allowlist/blocklist.
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
     /// Path to guardian.json. Expected shape: {"dev": {...}, "prod": {...}}.
-    /// Guardian picks the block matching `CLAUDIR_ENV` (default `prod`).
+    /// Guardian picks the block matching `TRIO_ENV` (default `prod`).
     #[arg(short, long, default_value = "guardian.json")]
     config: PathBuf,
 
-    /// Override the env selector. If unset, reads `CLAUDIR_ENV`.
+    /// Override the env selector. If unset, reads `TRIO_ENV`.
     #[arg(long)]
     env: Option<String>,
 }
@@ -39,7 +39,7 @@ fn main() -> Result<()> {
         // SAFETY: single-threaded at program start; setting env is fine here
         // before any other thread is spawned.
         unsafe {
-            std::env::set_var("CLAUDIR_ENV", e);
+            std::env::set_var("TRIO_ENV", e);
         }
     }
 

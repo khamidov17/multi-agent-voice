@@ -1394,7 +1394,7 @@ pub fn start_polling(
 
 /// Map a bot display name to its known Telegram user_id.
 ///
-/// These IDs are the real bot accounts in the claudir architecture.
+/// These IDs are the real bot accounts in the trio architecture.
 /// If an unknown name is supplied (e.g. in tests) we fall back to 0.
 pub fn bot_name_to_user_id(name: &str) -> i64 {
     match name {
