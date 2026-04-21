@@ -11,9 +11,9 @@
 
 ## Phase 0 — still open after slices 1-5
 
-- [ ] Dedicated journal writer task (HC2 from Eng review). Phase 0 events emit from dispatch; engine's own journal writes still share `Mutex<Connection>` with `compress_old_entries` + `search_journal`. Refactor to an mpsc-fed writer task is its own focused change.
+- [x] ~~Dedicated journal writer task (HC2 from Eng review)~~ (done 2026-04-21 in P0-fix-C: `JournalWriter` in `src/chatbot/journal.rs` owns its own `Connection`, mpsc-fed with 4096-slot queue, `try_send` + drop+warn on overflow. Wired through `ChatbotConfig.journal_writer` and hot-path emits in `tool_dispatch/mod.rs` + `protected_write.rs` prefer the writer when present, fall back to sync `journal::emit` otherwise. 3 new tests.)
 - [ ] `MessageSender` trait + separate `tg.send` events emitted from `telegram.rs` / `tool_dispatch/messaging.rs`. Current coverage via `tool_call` entries captures success/error; HTTP-status-level detail deferred.
-- [ ] Main-crate integration tests at `tests/phase0_*.rs`. Guardian crate has 28 end-to-end tests; main crate has 4 unit tests for `guardian_client` but no live protected_write round-trip.
+- [x] ~~Main-crate integration tests at `tests/phase0_*.rs`~~ (done 2026-04-21 in P0-fix-C: `tests/phase0_protected_write.rs` spawns a real `bootstrap_guardian::Guardian` in a background thread, drives `GuardianClient::protected_write` through 4 `#[serial]` tests covering allowed-write-lands-on-disk, protected-path-denied-with-alternatives, outside-allowed-root-denied, back-to-back-writes-both-succeed.)
 - [ ] `observability-wishlist.txt` — owner-only assignment. Not an AI task.
 - [ ] Live server-side smoke test on the RTX 3090: install via `scripts/bootstrap-phase0.sh`, `guardianctl status`, flip `nova_use_protected_write = true` in nova.json, verify Nova uses `protected_write` on a real task.
 - [ ] Regression eval: Nova multi-file task completion rate with `nova_use_protected_write=false` vs `true`. Acceptance: completion rate drop ≤ 10%.
@@ -36,8 +36,8 @@
 
 ### Performance
 
-- [ ] **HC2: dedicated journal writer task.** Current `journal::emit` holds `Mutex<Database>` across a synchronous SQLite insert in the dispatch hot path, serializing dual-lane execution. Fix: mpsc channel to a dedicated writer task owning its own `Connection`. (Phase 0 events use the new `emit` helper; the engine's existing journal writes via `compress_old_entries` / `search_journal` are the other half.) (/review performance + adversarial — high-confidence multi-specialist finding)
-- [ ] Proper log rotation size cap via the `file-rotate` crate OR a custom `MakeWriter`. Current daily-only rotation shipped; the "100 MiB cap" in the Phase 0 design doc is NOT enforced until this lands. (/review performance)
+- [x] ~~**HC2: dedicated journal writer task.**~~ (done 2026-04-21 in P0-fix-C — see Phase 0 open-items section.)
+- [x] ~~Proper log rotation size cap via the `file-rotate` crate~~ (done 2026-04-21 in P0-fix-C: `main.rs` now uses `file_rotate::FileRotate` with `ContentLimit::BytesSurpassed(100 * 1024 * 1024)` + `AppendTimestamp::default(FileLimit::MaxFiles(168))`. Real size cap; old rename-based no-op sweep is gone.)
 - [ ] Drop `GuardianClient::connect_lock` in favor of per-request fresh connections via `spawn_blocking`'s thread pool (or switch to a small connection pool with independent nonces). Serializes future high-volume `protected_write` bursts. (/review performance)
 - [ ] `tracing_appender` consider `lossy=false` (backpressure) instead of current default `lossy=true`. We now log dropped-line counters, but the right production default depends on whether burst-log-loss is more or less bad than burst-latency. (/review performance)
 
@@ -52,7 +52,7 @@
 
 ### Testing
 
-- [ ] Main-crate end-to-end integration tests at `tests/phase0_*.rs` — spawn a real guardian on a tempdir socket, build a real `GuardianClient`, call `execute_protected_write` through a real `ChatbotConfig`. Currently `bootstrap-guardian` has 13 integration tests but the main-crate dispatch layer has none. (/review testing)
+- [x] ~~Main-crate end-to-end integration tests at `tests/phase0_*.rs`~~ (done 2026-04-21 in P0-fix-C — see Phase 0 open-items section.)
 - [ ] Unit tests for `execute_protected_write` gates (Tier-2 rejection, guardian-absent, empty path, relative path, empty reason, oversized content). Currently zero coverage on the new dispatch module. (/review testing)
 - [ ] Unit tests for `sweep_old_logs` retention pass. (/review testing)
 - [ ] Unit tests for `journal::emit` swallow-error path (poisoned mutex must not panic). (/review testing)

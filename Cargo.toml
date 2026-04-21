@@ -36,6 +36,13 @@ rust_xlsxwriter = "0.81"
 libc = "0.2"
 serde_yaml = "0.9"
 uuid = { version = "1", features = ["v4"] }
+file-rotate = "0.8.0"
 
 [dev-dependencies]
 tempfile = "3"
+# Phase 0 integration tests spawn a real Guardian in-process so we can
+# assert the full protected_write flow end-to-end (harness → client →
+# guardian → fs::write). Path-based dev-dep avoids publishing the
+# guardian crate separately.
+bootstrap-guardian = { path = "bootstrap-guardian" }
+serial_test = "3"

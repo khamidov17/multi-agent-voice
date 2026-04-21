@@ -1,10 +1,10 @@
 # Claudir — Three-Tier Telegram Bot Architecture
 
-## Phase 0 — Bootstrap Guardian (in progress)
+## Phase 0 — Bootstrap Guardian (COMPLETE — 2026-04-21)
 
-A new Rust crate lives at [`bootstrap-guardian/`](bootstrap-guardian/). It is the write-guarding process that will prevent Nova from modifying its own harness, wrapper, or launch config when Nova gets woken up to autonomously ship code.
+A new Rust crate lives at [`bootstrap-guardian/`](bootstrap-guardian/). It is the write-guarding process that prevents Nova from modifying its own harness, wrapper, or launch config when Nova gets woken up to autonomously ship code.
 
-**Status right now (this branch):** slices 1 + 2 + 3 + 4 + 5 shipped. `/review` on 2026-04-21 caught 18 critical findings across 6 specialist reviewers + adversarial; 15 were auto-fixed in this PR, the rest deferred to follow-up PRs with clear rationale in `TODOS.md`. Notable fixes landed in the review pass:
+**Status right now (this branch):** all 5 slices shipped + 3 review-fix batches (P0-fix-A, P0-fix-B, P0-fix-C). `/review` on 2026-04-21 caught 18 critical findings across 6 specialist reviewers + adversarial. All 18 critical items either landed or are explicitly tracked in `TODOS.md` with rationale. Phase 1 (alert bus + triage report) starts next session as a separate PR. Notable fixes landed in the review pass:
 
 - **`nova_use_protected_write` flag is now actually plumbed to `ClaudeCode`** — previously dead code, flipping it had no effect. Now the harness routes through `start_with_guardian` with the real flag.
 - **Bash is dropped from Nova's tool string** when the flag is on, not just Edit/Write. Bash could read `guardian.key` (0400 but owned by the harness UID = Bash UID) and mint its own HMAC, bypassing the guardian entirely. Nova in locked mode now gets `Read,WebSearch` only + the MCP `protected_write` tool.
@@ -17,7 +17,9 @@ A new Rust crate lives at [`bootstrap-guardian/`](bootstrap-guardian/). It is th
 - **Length caps + control-char sanitization** on model-supplied path/reason before journal emit.
 - **Dead wrapper cleanup** — `ClaudeCode::start` + `spawn_process` removed; tool-string logic extracted into one `compute_allowed_tools` fn (the "MUST mirror" duplication comment is gone).
 - **Dropped-log-line watcher:** tracing-appender's `error_counter` is polled every 60s and surfaced via `warn!` when it advances. Post-mortems can now tell "nothing happened" from "we lost N lines."
-- **Size-cap rotation illusion removed:** the earlier 100 MiB "rotation" was a no-op (Unix rename keeps the fd on the same inode); we now ship daily-only rotation and document the gap honestly. Real size caps via `file-rotate` crate are a tracked follow-up.
+- **Real size-cap rotation** via the `file-rotate` crate — 100 MiB per file, up to 168 rotated files (7 days at 1 rotation/hour worst case). The earlier rename-based sweep was a no-op (Unix rename keeps fd on same inode); `file-rotate` owns the writer and reopens on rotation.
+- **HC2: dedicated `JournalWriter` task** — `src/chatbot/journal.rs` now exposes a mpsc-fed writer with a 4096-slot bounded queue and its own SQLite connection. Hot-path emits in `tool_dispatch/` use the writer when present, fall back to synchronous `journal::emit` otherwise. The old pattern held `Mutex<Database>` across a synchronous INSERT in the dispatch path, serializing Nova/Atlas/Sentinel parallel tool-call journaling. The writer eliminates that contention.
+- **Main-crate end-to-end integration tests** at `tests/phase0_protected_write.rs` — 4 `#[serial]` tests spawn a real guardian in a background thread and drive `GuardianClient::protected_write` through the same `spawn_blocking` path the dispatch uses. Covers allowed-write-lands-on-disk, protected-path-denied-with-alternatives, outside-allowed-root-denied, back-to-back-writes-both-succeed.
 
 Shipped:
 - Guardian binary + tests + break-glass CLI with pause/resume/status/**override-once**
@@ -28,17 +30,18 @@ Shipped:
 - **Journal Phase 0 entry types**: `tool_call`, `tg.send`, `guardian.allow`, `guardian.deny`, `guardian.error`. Best-effort `emit()` helper that logs failures via `tracing::warn!` instead of bubbling up.
 - **Tool-call journal events** emitted from `tool_dispatch/mod.rs` after every tool invocation (variant name + success/error + redacted preview + bot_name tag).
 - **Guardian journal events** (`guardian.allow` / `guardian.deny` / `guardian.error`) emitted from the `protected_write` dispatch.
-- **Log rotation** — daily via `tracing-appender::rolling::daily`, 7-day retention sweeper, **100 MiB size cap** enforced by the sweeper renaming oversized files (`.oversized-<unix_ts>`) so tracing-appender reopens the target on the next write.
+- **`JournalWriter` task** (HC2 fix) — mpsc-fed writer task with its own `Connection`, drains events off the dispatch hot path. `ChatbotConfig.journal_writer: Option<Arc<JournalWriter>>` threads through. Set to `None` for sync-fallback (used by integration tests for deterministic assertions).
+- **Log rotation** — `file-rotate` crate with `ContentLimit::BytesSurpassed(100 MiB)` + `AppendTimestamp::default(FileLimit::MaxFiles(168))`. Real size-cap enforcement; the old rename-based sweep is gone. Dropped-line counter polled every 60s.
 - Deploy templates for launchd (macOS) + systemd (Linux), bootstrap + uninstall scripts, pre-commit hook blocking credential-shaped files.
 - Full `docs/bootstrap-guardian.md` + `bootstrap-guardian/README.md` architecture write-ups.
 
 What is still deferred (tracked in TODOS.md):
 
-- **Dedicated journal writer task** (HC2 from Eng review). Current Phase 0 emits journal events from the dispatch layer, sidestepping the shared `Mutex<Connection>` contention for Phase 0 events. The engine's own `compress_old_entries` / `search_journal` still share the same mutex with the hot path — refactoring to an mpsc-fed writer task is its own focused change.
 - **Telegram `MessageSender` trait + separate `tg.send` events.** Current coverage via `tool_call` entries captures which sends happened and whether they succeeded; splitting out HTTP-status-level events from the specific `bot.send_message` callsites was deferred.
-- **Main-crate integration tests at `tests/phase0_*.rs`** — the `bootstrap-guardian` crate has 28 passing tests end-to-end; the main crate's guardian_client + dispatch flow is covered by 4 unit tests but no live end-to-end integration harness yet.
 - **`observability-wishlist.txt`** — the human owner's assignment (tail bots, break things, produce the wishlist). Not an AI task.
 - Live server-side smoke test: `./scripts/bootstrap-phase0.sh` on the deploy box, `guardianctl status`, flip `nova_use_protected_write = true` in `nova.json`, watch Nova use `protected_write` instead of Edit/Write.
+- Regression eval: Nova multi-file task completion rate with `nova_use_protected_write=false` vs `true`. Acceptance: completion rate drop ≤ 10%.
+- See TODOS.md "Phase 0 — deferred from /review" for the full long-tail of hardening items (openat2 TOCTOU, HMAC ordering, proto_version bumps, shared `guardian-proto` crate, ChatbotConfig sub-structs, etc.).
 
 **What you can do with the guardian today:** run `cargo test -p bootstrap-guardian` to verify the full decision matrix (Allow / DenyProtected / DenyOutsideAllowed / PathTraversal / BadHmac / ReplayDetected / UidMismatch / Paused / Malformed / Ping). Run `./scripts/bootstrap-phase0.sh` to install the launchd plist or systemd unit. Run `guardianctl status` after the guardian is up.
 

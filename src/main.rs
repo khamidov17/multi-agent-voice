@@ -209,6 +209,30 @@ impl BotState {
                 cognitive_daily_token_budget: config.cognitive_token_budget,
                 guardian_client,
                 nova_use_protected_write: config.nova_use_protected_write,
+                journal_writer: {
+                    // Phase 0 HC2 fix: spawn a dedicated journal writer
+                    // task with its own SQLite connection pointing at the
+                    // same `database.db`. Hot-path emissions push to an
+                    // mpsc channel instead of holding `Mutex<Database>`
+                    // across a synchronous INSERT.
+                    let db_path = config.data_dir.join("database.db");
+                    match crate::chatbot::journal::JournalWriter::spawn_with_path(&db_path) {
+                        Ok(w) => {
+                            info!(path = %db_path.display(), "journal writer spawned");
+                            Some(std::sync::Arc::new(w))
+                        }
+                        Err(e) => {
+                            warn!(
+                                "journal writer failed to open {}: {}. Hot-path observability \
+                                 falls back to synchronous emit; OK but may contend under \
+                                 dual-lane load.",
+                                db_path.display(),
+                                e
+                            );
+                            None
+                        }
+                    }
+                },
             };
 
             // Fetch available TTS voices if endpoint configured
@@ -702,29 +726,37 @@ async fn main() {
 
     let bot = Bot::new(&config.telegram_bot_token);
 
-    // Setup logging — Phase 0 log rotation.
+    // Setup logging — Phase 0 log rotation with REAL size cap.
     //
-    // `tracing_appender::rolling::daily` rotates log files at UTC midnight
-    // into `claudir.log.YYYY-MM-DD`. Retention sweeper deletes files older
-    // than 7 days once per hour.
+    // Uses the `file-rotate` crate for size-capped rotation: when
+    // `claudir.log` exceeds 100 MiB, it's renamed to
+    // `claudir.log.YYYYMMDD-HHMMSS` and a fresh file is opened. The
+    // tracing appender keeps writing to the same path (file-rotate
+    // reopens the target on rotation, unlike a bare Unix rename that
+    // would keep the fd on the old inode).
     //
-    // **Known gap (tracked in TODOS.md):** no size cap. A 100 MB intra-day
-    // burst will still produce a single large file until midnight. /review
-    // performance specialist confirmed that attempting a rename-based
-    // size-rotation is a no-op because Unix rename keeps the file
-    // descriptor on the same inode. A proper fix needs the `file-rotate`
-    // crate or a custom `MakeWriter` — follow-up PR.
+    // Rotation cap: 100 MiB per file.
+    // Retention: `max_files = 168` (7 days × 24 hourly-ish rotations is
+    // generous; the hourly sweeper below also deletes by mtime > 7 days
+    // so whichever limit hits first trims the dir). File-rotate itself
+    // removes old files past `max_files`.
     //
     // **Dropped-line visibility:** `tracing-appender::non_blocking` uses a
     // bounded channel (default 128k lines) and defaults to `is_lossy=true`,
     // meaning bursts silently drop entries. The returned `NonBlocking`
     // exposes an `error_counter()` that tracks dropped lines. We sample it
-    // every 60 seconds and log a `warn!` when the counter advances, so a
-    // post-mortem can distinguish "nothing happened" from "we lost N lines."
+    // every 60 seconds and log a `warn!` when the counter advances.
     let log_dir = config.data_dir.join("logs");
     std::fs::create_dir_all(&log_dir).ok();
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "claudir.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let log_path = log_dir.join("claudir.log");
+    let rotator = file_rotate::FileRotate::new(
+        &log_path,
+        file_rotate::suffix::AppendTimestamp::default(file_rotate::suffix::FileLimit::MaxFiles(168)),
+        file_rotate::ContentLimit::BytesSurpassed(100 * 1024 * 1024),
+        file_rotate::compression::Compression::None,
+        None, // default unix mode
+    );
+    let (non_blocking, _guard) = tracing_appender::non_blocking(rotator);
     let error_counter = non_blocking.error_counter();
 
     // Spawn the retention sweeper.

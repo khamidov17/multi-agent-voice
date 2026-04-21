@@ -122,6 +122,13 @@ pub struct ChatbotConfig {
     /// through the MCP `protected_write` tool. Default false — Nova keeps
     /// existing tools until the operator flips this.
     pub nova_use_protected_write: bool,
+    /// Async journal writer for Phase 0 observability hot-path events
+    /// (`tool_call`, `guardian.*`, `tg.send`). When present, dispatch-layer
+    /// emissions push to this writer instead of the synchronous
+    /// `journal::emit` path — lifts the `Mutex<Database>` serialization
+    /// that /review performance+adversarial flagged as HC2. When `None`,
+    /// hot-path emissions fall back to synchronous (e.g., in tests).
+    pub journal_writer: Option<Arc<crate::chatbot::journal::JournalWriter>>,
 }
 
 impl Default for ChatbotConfig {
@@ -149,6 +156,7 @@ impl Default for ChatbotConfig {
             cognitive_daily_token_budget: 500_000,
             guardian_client: None,
             nova_use_protected_write: false,
+            journal_writer: None,
         }
     }
 }

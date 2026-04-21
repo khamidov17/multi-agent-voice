@@ -718,22 +718,41 @@ pub(crate) async fn execute_tool(
     }
 
     // Phase 0 journal emission. Best-effort; never fails the hot path.
+    //
+    // Prefer the async `JournalWriter` when present (HC2 fix): it pushes
+    // to an mpsc channel in O(1) without holding any database lock, so
+    // dual-lane tool calls no longer serialize at the journal emission
+    // point. Fall back to synchronous `emit()` when the writer is not
+    // wired (tests, startup race before BotState fills it in).
     {
-        let db = database.lock().await;
-        let conn = db.connection();
-        crate::chatbot::journal::emit(
-            conn,
-            None,
-            crate::chatbot::journal::ENTRY_TOOL_CALL,
-            &format!(
-                "{}: {}",
-                tool_variant_name,
-                if result_is_error { "error" } else { "ok" }
-            ),
-            &result_preview,
-            &[],
-            &[config.bot_name.clone(), tool_variant_name.clone()],
+        let summary = format!(
+            "{}: {}",
+            tool_variant_name,
+            if result_is_error { "error" } else { "ok" }
         );
+        let tags = [config.bot_name.clone(), tool_variant_name.clone()];
+        if let Some(writer) = &config.journal_writer {
+            writer.emit(
+                None,
+                crate::chatbot::journal::ENTRY_TOOL_CALL,
+                &summary,
+                &result_preview,
+                &[],
+                &tags,
+            );
+        } else {
+            let db = database.lock().await;
+            let conn = db.connection();
+            crate::chatbot::journal::emit(
+                conn,
+                None,
+                crate::chatbot::journal::ENTRY_TOOL_CALL,
+                &summary,
+                &result_preview,
+                &[],
+                &tags,
+            );
+        }
     }
 
     match result {
