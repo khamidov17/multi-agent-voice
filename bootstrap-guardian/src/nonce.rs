@@ -28,38 +28,43 @@ impl NonceStore {
         })
     }
 
-    /// Atomically: read the highest nonce for `uid`; if `incoming > highest`,
-    /// update and return `true`; else return `false` (replay).
+    /// Atomic UPSERT — single SQL statement so the SELECT+UPDATE race can't
+    /// appear even if a future refactor drops the process-wide Mutex
+    /// (e.g. moves to a connection pool). `RETURNING` tells us whether the
+    /// row was inserted (first nonce for uid) or updated (strictly greater).
+    /// If neither happened (incoming ≤ highest_seen), no row is returned →
+    /// replay.
+    ///
+    /// Previously this was a 2-statement form inside a transaction. Correct
+    /// in a single-threaded-per-request world but brittle under refactor.
+    /// /review security flagged the fragility.
     pub fn consume(&self, uid: u32, incoming: u64) -> Result<bool> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| anyhow::anyhow!("nonce store mutex poisoned"))?;
-        let tx = conn.unchecked_transaction()?;
-        let current: Option<i64> = tx
-            .query_row(
-                "SELECT highest_seen FROM nonces WHERE uid = ?1",
-                params![uid as i64],
-                |row| row.get(0),
-            )
-            .ok();
 
-        if let Some(cur) = current {
-            if incoming as i64 <= cur {
-                return Ok(false);
-            }
-            tx.execute(
-                "UPDATE nonces SET highest_seen = ?1, last_updated = datetime('now') WHERE uid = ?2",
-                params![incoming as i64, uid as i64],
-            )?;
-        } else {
-            tx.execute(
-                "INSERT INTO nonces (uid, highest_seen) VALUES (?1, ?2)",
+        // INSERT ... ON CONFLICT DO UPDATE ... RETURNING. The `WHERE` on the
+        // UPDATE is what rejects stale nonces atomically — if the candidate
+        // isn't strictly greater, no UPDATE happens, and `RETURNING`
+        // produces no row.
+        let n_rows: usize = conn
+            .query_row(
+                "INSERT INTO nonces (uid, highest_seen) VALUES (?1, ?2)
+                 ON CONFLICT(uid) DO UPDATE
+                   SET highest_seen = excluded.highest_seen,
+                       last_updated = datetime('now')
+                   WHERE excluded.highest_seen > nonces.highest_seen
+                 RETURNING highest_seen",
                 params![uid as i64, incoming as i64],
-            )?;
-        }
-        tx.commit()?;
-        Ok(true)
+                |_| Ok(1usize),
+            )
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(0),
+                other => Err(other),
+            })?;
+
+        Ok(n_rows > 0)
     }
 
     /// Non-mutating check: would `consume(uid, incoming)` succeed right now?

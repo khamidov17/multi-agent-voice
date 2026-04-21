@@ -194,4 +194,71 @@ mod tests {
         assert!(!constant_time_eq("", "x"));
         assert!(constant_time_eq("", ""));
     }
+
+    #[test]
+    fn load_key_rejects_world_readable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("k");
+        std::fs::write(&path, vec![0u8; 32]).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let err = load_key(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("0644"),
+            "error must name the bad mode: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn load_key_rejects_group_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("k");
+        std::fs::write(&path, vec![0u8; 64]).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o440);
+        std::fs::set_permissions(&path, perms).unwrap();
+        assert!(load_key(&path).is_err());
+    }
+
+    #[test]
+    fn load_key_rejects_short_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("k");
+        std::fs::write(&path, vec![0u8; 16]).unwrap(); // < 32 bytes
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o400);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let err = load_key(&path).unwrap_err().to_string();
+        assert!(err.contains("32") || err.contains("16"), "{}", err);
+    }
+
+    #[test]
+    fn load_key_accepts_0400_with_32_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("k");
+        std::fs::write(&path, vec![0u8; 32]).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o400);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let k = load_key(&path).unwrap();
+        assert_eq!(k.len(), 32);
+    }
+
+    #[test]
+    fn load_key_accepts_0600_too() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("k");
+        std::fs::write(&path, vec![42u8; 64]).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&path, perms).unwrap();
+        assert!(load_key(&path).is_ok());
+    }
 }

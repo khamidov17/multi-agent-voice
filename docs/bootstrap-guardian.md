@@ -148,6 +148,67 @@ A noisy `denied_protected` cluster is Nova trying to touch things it shouldn't �
 - **Nova acquiring guardian UID.** OS-level user separation matters — run guardian as `claudir-guardian`, harness as `claudir-harness`.
 - **Nova shelling out.** If the MCP tool architecture lets Nova run `sh` (via the harness `Bash` tool), Nova can `rm -rf` guardian files. The next Phase 0 slice removes `Edit`, `Write`, AND `Bash` from Nova's CC tool string; the guardian only addresses `Edit`/`Write`. `Bash` removal is a separate (important) policy choice tracked in the design doc.
 
+## Wire format reference (for alternative clients)
+
+**Current version:** `proto_version = 1` (see `bootstrap-guardian/src/proto.rs::PROTO_VERSION`).
+
+Every request MUST set `proto_version`. The guardian accepts equal-or-older versions permissively and rejects strictly-newer versions with `ErrCode::Malformed`. Bump only for breaking wire-format changes.
+
+### Signing formula
+
+HMAC-SHA256 over the byte concatenation:
+
+```
+op_tag   || b"|" || path_utf8 || b"|" || sha256(bytes_raw) || b"|" || nonce_u64_le
+```
+
+Where `op_tag` is the serde-rename bytes:
+
+| `Op` | op_tag bytes | Key |
+|---|---|---|
+| `Op::Write` | `b"write"` | `guardian.key` |
+| `Op::Ping` | `b"ping"` | `guardian.key` |
+| `Op::OverrideWrite` | `b"override_write"` | **`override.key`** (separate file) |
+
+Output: lowercase hex of the 32-byte HMAC digest (64 hex chars).
+
+The pinned fixture `key = [0u8..64u8], op = Write, path = "/a", bytes = b"x", nonce = 1` produces `c28f43f14294ab137e3be1662eb17ad95057fc90af682ef6df2fdbf880613892`. Both the guardian and harness-client crates have a matching test asserting this hex — it's the drift alarm.
+
+### OverrideWrite
+
+Requires a separate `override_key_path` configured in `guardian.json`. The file must be mode 0400 with ≥32 bytes, same rules as `guardian.key`. The key is **not** trusted to the harness — only to the human operator. `guardianctl override-once --path X --reason Y [--content Z]` is the reference client.
+
+OverrideWrite still enforces:
+- `allowed_uids` (the peer UID must be registered)
+- Nonce replay protection (same nonce store as regular Write)
+- Path canonicalization + `O_NOFOLLOW` + atomic tempfile-rename
+- `allowed_roots` (cannot escape to paths outside the allowlist)
+
+Only `DenyProtected` is bypassed.
+
+### Idempotency contract
+
+**`protected_write` is at-least-once.** If the transport fails mid-RPC (guardian wrote but the response didn't return), the client will retry with a new nonce and the write MAY re-apply the same content. This is safe for content-only writes (second write = same bytes) and for writes the caller can make idempotent in payload (include a timestamp or version in the content). It is NOT safe for sequence-dependent writes.
+
+If you need at-most-once semantics, add a request-id + reply cache on the guardian side (not shipped; tracked in TODOS.md).
+
+### Typed error codes (`err_code`)
+
+Stable serde names. The harness's `ClientErrCode` mirrors these exactly. Variants added, never renamed — renames break downstream branching.
+
+| err_code | Shape | Callers should |
+|---|---|---|
+| `denied` | `DenyProtected` (protected path) or outside `allowed_roots` | Read `alternative_roots`, retry with a compliant path, or request `guardianctl override-once` |
+| `path_traversal` | Canonicalization failed; symlink loop or missing non-creatable ancestor | Check the path exists or has a creatable parent inside an allowed root |
+| `bad_hmac` | Wrong key, tampered payload, or stale key on disk | Restart harness to reload key |
+| `replay_detected` | Nonce ≤ guardian's highest-seen for this UID | Increment client counter and retry |
+| `uid_mismatch` | Peer UID not in `allowed_uids` | Install-time misconfiguration — check unit file |
+| `io_error` | Filesystem returned an error after auth passed | Check disk space + permissions on target |
+| `ipc_timeout` | Socket saturated or guardian stalled | Back off, retry once; escalate to human if persistent |
+| `malformed` | Bad JSON / bad base64 / proto_version too new | Check request shape; if version drift, upgrade guardian |
+| `paused` | `guardianctl pause` is active | Wait for `guardianctl resume` |
+| `override_disabled` | `OverrideWrite` but no override key configured | Install an override key or use a regular Write to an unprotected path |
+
 ## Roadmap
 
 1. **This slice (shipped).** Standalone guardian binary + guardianctl + tests + scripts.

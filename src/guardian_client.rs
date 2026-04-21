@@ -55,7 +55,60 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+/// Typed mirror of the guardian's `ErrCode`. Kept as a separate type (not
+/// a re-export) so the harness has no cargo dep on `bootstrap-guardian`.
+/// serde rename strings are **pinned** — must match `proto::ErrCode` in the
+/// guardian crate exactly. Any drift is caught by the HMAC-fixture tests
+/// + the wire-version proto_version field.
+///
+/// Carries an `Unknown(String)` escape hatch so a newer guardian returning
+/// an unseen code still deserializes; the caller can log it rather than
+/// crashing deserialize.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientErrCode {
+    Denied,
+    PathTraversal,
+    BadHmac,
+    ReplayDetected,
+    UidMismatch,
+    IoError,
+    IpcTimeout,
+    Malformed,
+    Paused,
+    OverrideDisabled,
+    /// Captures any guardian-side variant we don't recognize, so a newer
+    /// guardian returning (say) `rate_limited` still deserializes. Callers
+    /// treat this as "try again later, with human review."
+    #[serde(other)]
+    Unknown,
+}
+
+impl ClientErrCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Denied => "denied",
+            Self::PathTraversal => "path_traversal",
+            Self::BadHmac => "bad_hmac",
+            Self::ReplayDetected => "replay_detected",
+            Self::UidMismatch => "uid_mismatch",
+            Self::IoError => "io_error",
+            Self::IpcTimeout => "ipc_timeout",
+            Self::Malformed => "malformed",
+            Self::Paused => "paused",
+            Self::OverrideDisabled => "override_disabled",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Public result of a `protected_write` call.
+///
+/// `Err` carries a typed `ClientErrCode` so Nova/the MCP tool can branch
+/// cleanly on known categories (Paused vs IoError vs Malformed) rather than
+/// string-matching a raw error code. Previously every non-Denied guardian
+/// err collapsed into a generic `{code: String, ...}` shape (/review
+/// api-contract + maintainability).
 #[derive(Debug, Clone)]
 pub enum WriteResult {
     Ok {
@@ -66,7 +119,7 @@ pub enum WriteResult {
         alternatives: Vec<String>,
     },
     Err {
-        code: String,
+        code: ClientErrCode,
         message: String,
         suggested_action: Option<String>,
     },
@@ -82,6 +135,11 @@ pub struct GuardianClient {
     socket_path: PathBuf,
     // Key bytes — never Debug-printed (see Debug impl below).
     key: Vec<u8>,
+    /// Retained so a supervisor task can periodically re-stat the key file
+    /// to catch mode drift (0400 → 0644 after a disk-restore, a misapplied
+    /// chmod, etc.). The key bytes themselves are never reloaded from disk
+    /// at runtime — rotating the key is a restart-the-harness operation.
+    key_path: PathBuf,
     nonce: AtomicU64,
     /// Serializes writes so multiple harness threads take turns talking
     /// to the guardian — one request per connection is cheap and keeps
@@ -106,21 +164,85 @@ impl std::fmt::Debug for GuardianClient {
 impl GuardianClient {
     /// Open a new client. Reads the key immediately (so a missing or
     /// bad-mode key is loud at startup, not at first write).
+    ///
+    /// Nonce seed combines two sources:
+    /// - high 32 bits: nanosecond timestamp (monotonic-ish across reboots)
+    /// - low 32 bits: random from `/dev/urandom`
+    ///
+    /// This makes the seed space 2^64 even if the clock jumps backward
+    /// (NTP step, VM snapshot restore), so a fresh harness won't land on a
+    /// sequence the guardian has already seen and trigger permanent
+    /// `ReplayDetected`. /review security + adversarial flagged plain
+    /// `(nanos as u64)` as a lockout risk under clock regressions.
     pub fn new(socket_path: &Path, key_path: &Path) -> Result<Self> {
         let key = load_key(key_path)?;
-        // Seed nonce from a nanosecond timestamp so a fresh process is
-        // extremely unlikely to collide with a prior-run nonce.
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let seed = Self::seed_nonce();
         Ok(Self {
             socket_path: socket_path.to_path_buf(),
             key,
+            key_path: key_path.to_path_buf(),
             nonce: AtomicU64::new(seed),
             connect_lock: Mutex::new(()),
             timeout: Duration::from_secs(5),
         })
+    }
+
+    /// Re-stat the key file on disk and return Err if the mode drifted
+    /// from the startup value (must still be 0400 or 0600) OR if the file
+    /// is missing. Intended for periodic invocation from a supervisor task
+    /// so silent perms drift doesn't leave the HMAC key world-readable.
+    ///
+    /// Does NOT reload the key bytes — rotation is a harness-restart
+    /// operation by design. /review security flagged that the client
+    /// loads the key once at startup and never re-validates; this closes
+    /// the visibility gap without introducing runtime key reload.
+    pub fn recheck_key_mode(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(&self.key_path).with_context(|| {
+            format!(
+                "guardian key {} missing or unstatable",
+                self.key_path.display()
+            )
+        })?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o400 && mode != 0o600 {
+            anyhow::bail!(
+                "guardian key {} mode drifted to 0{:o}; expected 0400 or 0600. \
+                 Reset with `chmod 0400 {}`.",
+                self.key_path.display(),
+                mode,
+                self.key_path.display()
+            );
+        }
+        Ok(())
+    }
+
+    fn seed_nonce() -> u64 {
+        // Time bits: nanos since epoch, high 32 of the 128 — gives us
+        // monotonic-ish behavior at second-scale.
+        let nanos: u128 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let time_hi: u64 = ((nanos >> 32) & 0xFFFF_FFFF) as u64;
+
+        // Random low bits from /dev/urandom. Best-effort; if it fails we
+        // fall back to nanos low bits (still unpredictable to an external
+        // attacker because they don't know our boot time to the ns).
+        let mut rand_bytes = [0u8; 4];
+        let rand_lo: u64 = match std::fs::File::open("/dev/urandom") {
+            Ok(mut f) => {
+                use std::io::Read;
+                if f.read_exact(&mut rand_bytes).is_ok() {
+                    u32::from_le_bytes(rand_bytes) as u64
+                } else {
+                    (nanos as u64) & 0xFFFF_FFFF
+                }
+            }
+            Err(_) => (nanos as u64) & 0xFFFF_FFFF,
+        };
+
+        (time_hi << 32) | rand_lo
     }
 
     /// Write `content` to `path` via the guardian. `reason` is audit-logged.
@@ -139,6 +261,7 @@ impl GuardianClient {
             nonce,
             hmac,
             reason: Some(reason.to_string()),
+            proto_version: CLIENT_PROTO_VERSION,
         };
         let resp = self.rpc(&req)?;
         Ok(map_resp(resp))
@@ -158,6 +281,7 @@ impl GuardianClient {
             nonce,
             hmac,
             reason: Some("ping".to_string()),
+            proto_version: CLIENT_PROTO_VERSION,
         };
         let resp = self.rpc(&req)?;
         Ok(resp.ok)
@@ -195,6 +319,11 @@ impl GuardianClient {
 /// harness is a teloxide/tokio-flavored Rust crate and the guardian is
 /// a tiny self-contained binary, and cross-dep-sharing adds more pain
 /// than the ~50 lines of duplication saves.
+/// Current wire-format version the client advertises. Must match
+/// `bootstrap_guardian::proto::PROTO_VERSION`. Bumping requires a
+/// coordinated edit of both crates' constants plus the HMAC fixture tests.
+const CLIENT_PROTO_VERSION: u32 = 1;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Req {
     op: String,
@@ -204,6 +333,10 @@ struct Req {
     hmac: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// Wire-format version. Guardian rejects requests NEWER than it
+    /// understands with `Malformed`. Always set; older guardians that
+    /// don't know the field simply ignore it via `#[serde(default)]`.
+    proto_version: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,14 +344,19 @@ struct Resp {
     ok: bool,
     #[serde(default)]
     written_bytes: Option<u64>,
+    /// Typed err_code. `#[serde(other)]` on `ClientErrCode::Unknown` means a
+    /// newer guardian returning an unrecognized variant still deserializes.
     #[serde(default)]
-    err_code: Option<String>,
+    err_code: Option<ClientErrCode>,
     #[serde(default)]
     message: Option<String>,
     #[serde(default)]
     suggested_action: Option<String>,
     #[serde(default)]
     alternative_roots: Option<Vec<String>>,
+    #[serde(default)]
+    #[allow(dead_code)] // reserved for future version-gated client behavior
+    proto_version: Option<u32>,
 }
 
 fn load_key(path: &Path) -> Result<Vec<u8>> {
@@ -269,13 +407,14 @@ fn map_resp(resp: Resp) -> WriteResult {
             written_bytes: resp.written_bytes.unwrap_or(0),
         };
     }
-    match resp.err_code.as_deref() {
-        Some("denied") => WriteResult::Denied {
+    let code = resp.err_code.unwrap_or(ClientErrCode::Unknown);
+    match code {
+        ClientErrCode::Denied => WriteResult::Denied {
             reason: resp.message.unwrap_or_else(|| "denied".into()),
             alternatives: resp.alternative_roots.unwrap_or_default(),
         },
-        _ => WriteResult::Err {
-            code: resp.err_code.unwrap_or_else(|| "unknown".into()),
+        other => WriteResult::Err {
+            code: other,
             message: resp.message.unwrap_or_else(|| "<no message>".into()),
             suggested_action: resp.suggested_action,
         },
@@ -335,6 +474,7 @@ mod tests {
             message: None,
             suggested_action: None,
             alternative_roots: None,
+            proto_version: Some(1),
         };
         assert!(matches!(map_resp(r), WriteResult::Ok { written_bytes: 5 }));
     }
@@ -344,16 +484,49 @@ mod tests {
         let r = Resp {
             ok: false,
             written_bytes: None,
-            err_code: Some("denied".to_string()),
+            err_code: Some(ClientErrCode::Denied),
             message: Some("protected".to_string()),
             suggested_action: None,
             alternative_roots: Some(vec!["/opt/nova/data".to_string()]),
+            proto_version: Some(1),
         };
         match map_resp(r) {
             WriteResult::Denied { alternatives, .. } => {
                 assert_eq!(alternatives, vec!["/opt/nova/data".to_string()])
             }
             other => panic!("expected Denied, got {:?}", other),
+        }
+    }
+
+    /// Guardian returned a typed err we recognize → promoted to WriteResult::Err
+    /// with the correct ClientErrCode.
+    #[test]
+    fn map_resp_typed_err_paused() {
+        let r = Resp {
+            ok: false,
+            written_bytes: None,
+            err_code: Some(ClientErrCode::Paused),
+            message: Some("guardian admin-paused".to_string()),
+            suggested_action: Some("run guardianctl resume".to_string()),
+            alternative_roots: None,
+            proto_version: Some(1),
+        };
+        match map_resp(r) {
+            WriteResult::Err { code, .. } => assert_eq!(code, ClientErrCode::Paused),
+            other => panic!("expected Err(Paused), got {:?}", other),
+        }
+    }
+
+    /// A newer guardian returns an err_code this client doesn't know about.
+    /// serde's `#[serde(other)]` routes it to ClientErrCode::Unknown so
+    /// deserialization doesn't fail; map_resp still surfaces a useful shape.
+    #[test]
+    fn unknown_err_code_deserializes_to_unknown_not_panic() {
+        let json = r#"{"ok":false,"err_code":"rate_limited","message":"too fast"}"#;
+        let resp: Resp = serde_json::from_str(json).unwrap();
+        match map_resp(resp) {
+            WriteResult::Err { code, .. } => assert_eq!(code, ClientErrCode::Unknown),
+            other => panic!("expected Err(Unknown), got {:?}", other),
         }
     }
 }

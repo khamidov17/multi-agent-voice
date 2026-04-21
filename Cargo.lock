@@ -296,6 +296,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "teloxide",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tracing",
