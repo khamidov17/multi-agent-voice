@@ -6,6 +6,7 @@ mod messaging;
 mod moderation;
 mod planning;
 mod fix_plans;
+mod implementation;
 mod protected_write;
 mod reflection;
 mod triage;
@@ -733,6 +734,27 @@ pub(crate) async fn execute_tool(
             )
             .await
         }
+        ToolCall::StartImplementation {
+            plan_id,
+            base_branch,
+        } => implementation::execute_start_implementation(
+            config,
+            *plan_id,
+            base_branch.as_deref(),
+        ),
+        ToolCall::CommitAndPush { plan_id, message } => {
+            implementation::execute_commit_and_push(config, *plan_id, message)
+        }
+        ToolCall::OpenPr {
+            plan_id,
+            title,
+            draft,
+        } => implementation::execute_open_pr(
+            config,
+            *plan_id,
+            title.as_deref(),
+            *draft,
+        ),
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
     };

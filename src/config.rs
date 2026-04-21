@@ -128,6 +128,13 @@ struct ConfigFile {
     /// next Phase 0 slice.
     #[serde(default)]
     nova_use_protected_write: bool,
+    /// Phase 3 — path to the main source-code clone for worktree
+    /// creation. Defaults to `std::env::current_dir()` at boot when
+    /// unset, which is the usual "run trio from inside the repo"
+    /// pattern. Set explicitly when the harness runs from a deploy
+    /// location distinct from the source.
+    #[serde(default)]
+    repo_path: Option<String>,
 }
 
 fn default_cognitive_token_budget() -> u64 {
@@ -224,6 +231,10 @@ pub struct Config {
     /// so Phase 0 can ship the guardian first with Nova unchanged, then
     /// flip this to true in a follow-up PR. Shadow-mode cutover knob.
     pub nova_use_protected_write: bool,
+    /// Phase 3 — path to the main source-code clone. None = use cwd at
+    /// boot. Used by the worktree manager for per-plan implementation
+    /// mode; no effect on bots without `full_permissions=true`.
+    pub repo_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -310,6 +321,7 @@ impl Config {
             guardian_socket_path: file.guardian_socket_path.map(PathBuf::from),
             guardian_key_path: file.guardian_key_path.map(PathBuf::from),
             nova_use_protected_write: file.nova_use_protected_write,
+            repo_path: file.repo_path.map(PathBuf::from),
         }
     }
 

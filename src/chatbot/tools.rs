@@ -743,6 +743,47 @@ pub enum ToolCall {
         preamble: String,
     },
 
+    /// Phase 3 — create a git worktree at `<shared>/worktrees/plan-<id>/`
+    /// branched from `main` (or `base_branch`), enter implementation
+    /// mode for this plan. Nova then writes files into the worktree
+    /// via `protected_write` using paths rooted at the returned
+    /// `worktree_path`. The worktree sits inside guardian's
+    /// `allowed_roots` and disjoint from `protected_paths`, so the
+    /// bootstrap invariant holds — Nova cannot modify the main clone's
+    /// source during implementation.
+    StartImplementation {
+        plan_id: i64,
+        /// Optional base branch; defaults to `main` when None.
+        base_branch: Option<String>,
+    },
+
+    /// Phase 3 — stage all changes in the plan's worktree, commit with
+    /// `message`, and push `-u origin phase-3/plan-<id>`. Returns
+    /// `{sha, branch}` so Nova can reference the commit in her PR
+    /// description or owner status update. Refuses if the worktree
+    /// is clean (nothing to commit) — that's almost always Nova
+    /// forgetting to write files first.
+    CommitAndPush {
+        plan_id: i64,
+        message: String,
+    },
+
+    /// Phase 3 — open the PR for this plan via `gh pr create`. Body
+    /// is the plan's markdown (formatted harness-side), base is the
+    /// plan's stored `base_branch`, head is the worktree's branch.
+    /// On success: transitions plan `approved → implemented` and
+    /// reaps the local worktree (remote branch stays alive for
+    /// review). Returns `{pr_url, pr_number}`.
+    OpenPr {
+        plan_id: i64,
+        /// Optional — override the PR title. When None, harness uses
+        /// the plan's `title` field.
+        title: Option<String>,
+        /// If true, opens as a draft PR (for early-feedback flows).
+        #[serde(default)]
+        draft: bool,
+    },
+
     /// Parse error - tool call couldn't be parsed. Error message will be sent back to model.
     #[serde(skip)]
     ParseError { message: String },
@@ -1845,6 +1886,58 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "start_implementation".to_string(),
+            description: "Phase 3 — begin implementing an APPROVED fix plan. Creates a git worktree at <shared>/worktrees/plan-<id>/ off `base_branch` (defaults to `main`), and returns paths Nova uses to write files. Nova then calls `protected_write` with paths INSIDE that worktree (e.g. `<worktree_path>/src/foo.rs`). The worktree is inside guardian's allowed_roots and disjoint from the main source clone — the Phase 0 invariant holds. Refuses if the plan isn't status=approved, or if a worktree for this plan already exists. Response: `{worktree_path, branch, base_branch}`.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {
+                        "type": "integer",
+                        "description": "ID of the approved plan. Must be status=approved."
+                    },
+                    "base_branch": {
+                        "type": "string",
+                        "description": "Base branch for the worktree; defaults to 'main'."
+                    }
+                },
+                "required": ["plan_id"]
+            }),
+        },
+        Tool {
+            name: "commit_and_push".to_string(),
+            description: "Phase 3 — stage all changes in plan <plan_id>'s worktree, commit with `message`, and push `-u origin phase-3/plan-<id>`. Call this ONCE you're done writing files for this plan via protected_write. Refuses if the worktree is clean (nothing to commit — you probably forgot to write the files). Also refuses oddly-shaped commit messages (empty, leading dash). Response: `{sha, branch}`.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {"type": "integer"},
+                    "message": {
+                        "type": "string",
+                        "description": "Commit message. Use conventional commits style: 'fix(module): ...', 'feat(module): ...'. Reference the alert_id in the body."
+                    }
+                },
+                "required": ["plan_id", "message"]
+            }),
+        },
+        Tool {
+            name: "open_pr".to_string(),
+            description: "Phase 3 — open a PR on GitHub for plan <plan_id> via `gh pr create`. Body is the plan's markdown auto-formatted by the harness. On success: transitions plan `approved → implemented`, reaps the local worktree (remote branch stays alive). Response: `{pr_url, pr_number}`. After this call the plan is DONE from Nova's side — owner reviews + merges on GitHub.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {"type": "integer"},
+                    "title": {
+                        "type": "string",
+                        "description": "Optional PR title. When omitted, uses the plan's `title` field."
+                    },
+                    "draft": {
+                        "type": "boolean",
+                        "description": "Open as draft PR. Default false."
+                    }
+                },
+                "required": ["plan_id"]
+            }),
+        },
+        Tool {
             name: "send_triage_report".to_string(),
             description: "Phase 1 — send a consolidated Telegram DM to the owner summarizing the currently open bug alerts. The harness formats the alert list as markdown (severity badges, counts, last_seen times, short evidence preview) and appends it to your `preamble`. When `auto_mark_triaged` is true, all alerts included in the report are closed atomically after the send succeeds — don't forget to read them first with `read_alerts`. Use this for end-of-triage summaries or on-demand status replies to the owner.".to_string(),
             parameters: serde_json::json!({
@@ -1931,13 +2024,14 @@ mod tests {
         // Phase 1 added three: read_alerts, mark_triaged, send_triage_report.
         // Phase 2 added four: draft_fix_plan, list_fix_plans,
         //                     update_fix_plan_status, send_fix_plan_to_owner.
+        // Phase 3 added three: start_implementation, commit_and_push, open_pr.
         assert_eq!(
             tools.len(),
-            78,
+            81,
             "Tool count changed — update this test. Tools: {:?}",
             names
         );
-        // Phase 1 + Phase 2 tools must be present and discoverable by Nova.
+        // Phase 1/2/3 tools must be present and discoverable by Nova.
         for expected in [
             "read_alerts",
             "mark_triaged",
@@ -1946,6 +2040,9 @@ mod tests {
             "list_fix_plans",
             "update_fix_plan_status",
             "send_fix_plan_to_owner",
+            "start_implementation",
+            "commit_and_push",
+            "open_pr",
         ] {
             assert!(
                 names.contains(&expected),
