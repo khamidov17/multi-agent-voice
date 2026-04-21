@@ -1,5 +1,6 @@
 //! Chatbot module - relays Telegram messages to Claude Code.
 
+pub mod alerts;
 pub mod bot_messages;
 pub mod callbacks;
 pub mod claude_code;
