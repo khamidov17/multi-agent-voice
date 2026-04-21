@@ -7,11 +7,19 @@
 //! and these requests are low-rate.
 
 use anyhow::{Context, Result};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Maximum bytes the guardian will read from a single request before giving
+/// up with `Malformed`. Defends against a local client that opens a socket
+/// and streams unbounded bytes with no newline. 16 MiB is a balance: large
+/// enough for any realistic base64-encoded payload (a ~11 MB raw write
+/// after base64 overhead), small enough that a malicious stream cannot OOM
+/// the guardian before the read timeout fires.
+const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 
 use crate::audit::{AuditEvent, AuditLog};
 use crate::auth::{compute_hmac, constant_time_eq, load_key, peer_uid};
@@ -121,7 +129,12 @@ impl Guardian {
             }
         };
 
-        let mut reader = BufReader::new(stream.try_clone()?);
+        // Size-cap the request to defend against a client that opens a socket
+        // and writes an unbounded stream with no newline — /review adversarial
+        // flagged this as an OOM-style DoS that outlives the read timeout.
+        // 16 MiB is comfortably larger than any realistic base64-encoded write
+        // payload we expect (typical source files < 1 MiB, memory blobs < 10 MiB).
+        let mut reader = BufReader::new(stream.try_clone()?.take(MAX_REQUEST_BYTES));
         let mut writer = stream;
 
         let mut line = String::new();
@@ -133,6 +146,23 @@ impl Guardian {
             }
         };
         if n == 0 {
+            return Ok(());
+        }
+        // If we filled the buffer without seeing a newline, treat as malformed
+        // and bail (Take caps at MAX_REQUEST_BYTES so read_line returns early).
+        if n >= MAX_REQUEST_BYTES as usize && !line.ends_with('\n') {
+            tracing::warn!(uid, n, "request exceeded size cap without newline");
+            let resp = Resp::err(
+                ErrCode::Malformed,
+                format!(
+                    "request exceeded {} byte cap without a terminating newline",
+                    MAX_REQUEST_BYTES
+                ),
+            );
+            let resp_line = serde_json::to_string(&resp)?;
+            writer.write_all(resp_line.as_bytes())?;
+            writer.write_all(b"\n")?;
+            writer.flush()?;
             return Ok(());
         }
 
@@ -274,8 +304,17 @@ impl Guardian {
             return Resp::err(ErrCode::BadHmac, "HMAC mismatch");
         }
 
-        // Nonce — replay protection.
-        match self.nonces.consume(uid, req.nonce) {
+        // Nonce — replay protection. Two-phase pattern:
+        //   1. `would_accept` (non-mutating) validates nonce-is-fresh BEFORE
+        //      we attempt the op.
+        //   2. After the op succeeds, we call `consume` to commit.
+        //
+        // Previously the nonce was consumed here, before the write. A
+        // transient fs error (ENOSPC, EROFS, quota) would burn the nonce,
+        // forcing the client to skip a value. /review adversarial flagged
+        // this as a correctness hazard. The two-phase pattern makes failed
+        // writes idempotent from the nonce's perspective.
+        match self.nonces.would_accept(uid, req.nonce) {
             Ok(true) => {}
             Ok(false) => {
                 self.audit.write(&AuditEvent {
@@ -296,7 +335,7 @@ impl Guardian {
             }
         }
 
-        match req.op {
+        let resp = match req.op {
             Op::Ping => {
                 self.audit.write(&AuditEvent {
                     ts: AuditLog::now(),
@@ -312,7 +351,22 @@ impl Guardian {
             }
             Op::Write => self.do_write(uid, &req, &bytes),
             Op::OverrideWrite => self.do_override_write(uid, &req, &bytes),
+        };
+
+        // Commit the nonce only if the op succeeded. On failure the client
+        // can retry the SAME nonce — two-phase pattern, per /review adversarial.
+        if resp.ok
+            && let Err(e) = self.nonces.consume(uid, req.nonce)
+        {
+            // Op succeeded on disk but we cannot commit the nonce. Log
+            // loudly; next request with the same nonce will hit this
+            // would_accept branch as true again, so there's a tiny
+            // replay window until we retry the commit. Acceptable given
+            // the typical NonceStore failure is transient disk pressure
+            // that also blocks future writes.
+            tracing::error!(err = %e, uid, nonce = req.nonce, "nonce commit failed after successful op");
         }
+        resp
     }
 
     fn do_write(&self, uid: u32, req: &Req, bytes: &[u8]) -> Resp {
@@ -580,18 +634,82 @@ fn op_tag(op: Op) -> &'static str {
     }
 }
 
-/// Open + write a file with O_NOFOLLOW on the target filename. If the target
-/// is a symlink, open fails with ELOOP — symlink swap TOCTOU defeated.
+/// Atomic write with O_NOFOLLOW + temp-file-then-rename.
+///
+/// Write goes to `<path>.tmp.<pid>.<nanos>` with `O_EXCL|O_NOFOLLOW`, gets
+/// `sync_all`'d, then atomically `rename`d over the target. This fixes two
+/// issues /review adversarial flagged:
+///
+/// - **Crash mid-write = corrupt file.** The previous
+///   `create+truncate+write` opened the target, zeroed it, then streamed
+///   bytes. A power loss or OOM between truncate and the final byte left
+///   the target file truncated or partial. Nova-serialized state
+///   (memories, session_id) would fail to deserialize on next boot. The
+///   temp-then-rename pattern means the target is either the old bytes OR
+///   the new bytes — never a mix.
+/// - **Concurrent writes interleave.** Two simultaneous `protected_write`
+///   calls to the same path with the previous code would race on the same
+///   fd and interleave bytes. With this pattern, each call writes to its
+///   own uniquely-named temp file, and only the final `rename` is racy —
+///   but `rename` is atomic at the directory-entry level on POSIX, so one
+///   wins, the other loses (last rename wins), and neither file is
+///   interleaved.
+///
+/// `O_NOFOLLOW` on the temp path defends against an attacker swapping in a
+/// symlink at the temp name between our `openat` and the exclusive
+/// creation. Note: `O_NOFOLLOW` only checks the final path component; the
+/// TOCTOU surface on intermediate directories remains (tracked in
+/// TODOS.md as a Linux-only `openat2(RESOLVE_NO_SYMLINKS|RESOLVE_BENEATH)`
+/// hardening follow-up).
 fn write_with_nofollow(path: &Path, bytes: &[u8]) -> std::io::Result<u64> {
     use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no parent directory",
+        )
+    })?;
+    let file_name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+    })?;
+
+    // Per-call unique temp name (pid + nanos), inside the same parent so
+    // the final rename is an atomic intra-directory operation.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_name = format!(".{}.tmp.{}.{}", file_name, std::process::id(), nanos);
+    let tmp_path = parent.join(&tmp_name);
+
+    // Create EXCL|NOFOLLOW — fails if an attacker pre-created the name or
+    // swapped a symlink in. Mode 0600 so only the guardian UID can read
+    // partial state if a crash leaves the temp file behind.
     let mut file = std::fs::OpenOptions::new()
-        .create(true)
+        .read(false)
         .write(true)
-        .truncate(true)
+        .create_new(true) // O_CREAT | O_EXCL
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+        .mode(0o600)
+        .open(&tmp_path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
+    drop(file);
+
+    // Atomic rename over the target. Cleanup temp on failure.
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    // fsync the parent directory so the rename is durable on crash (ext4
+    // default; belt-and-suspenders on other filesystems). Best-effort —
+    // opening a directory for fsync isn't portable to every filesystem.
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+
     Ok(bytes.len() as u64)
 }
 

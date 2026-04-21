@@ -4,7 +4,20 @@
 
 A new Rust crate lives at [`bootstrap-guardian/`](bootstrap-guardian/). It is the write-guarding process that will prevent Nova from modifying its own harness, wrapper, or launch config when Nova gets woken up to autonomously ship code.
 
-**Status right now (this branch):** slices 1 + 2 + 3 + 4 + 5 have all shipped.
+**Status right now (this branch):** slices 1 + 2 + 3 + 4 + 5 shipped. `/review` on 2026-04-21 caught 18 critical findings across 6 specialist reviewers + adversarial; 15 were auto-fixed in this PR, the rest deferred to follow-up PRs with clear rationale in `TODOS.md`. Notable fixes landed in the review pass:
+
+- **`nova_use_protected_write` flag is now actually plumbed to `ClaudeCode`** — previously dead code, flipping it had no effect. Now the harness routes through `start_with_guardian` with the real flag.
+- **Bash is dropped from Nova's tool string** when the flag is on, not just Edit/Write. Bash could read `guardian.key` (0400 but owned by the harness UID = Bash UID) and mint its own HMAC, bypassing the guardian entirely. Nova in locked mode now gets `Read,WebSearch` only + the MCP `protected_write` tool.
+- **Bootstrap script rejects same-UID installs in prod** (`CLAUDIR_ALLOW_SAME_UID=1` override for dev sandboxes). Without UID separation filesystem perms can't actually enforce the invariant.
+- **Atomic writes** in the guardian via tempfile + rename. Previous `create+truncate+write` was not crash-safe and concurrent writes to the same path interleaved bytes. Now each call writes to `.tmp.<pid>.<nanos>` with `O_EXCL|O_NOFOLLOW`, fsyncs, and atomically renames over the target.
+- **Two-phase nonce:** `would_accept` peek BEFORE op, `consume` AFTER successful op. A transient fs error no longer burns a nonce.
+- **16 MiB request cap** on the guardian UDS read path to block unbounded-stream DoS.
+- **UTF-8 safe truncation** in `journal.rs` — multi-byte detail strings no longer panic at byte 500.
+- **Pinned HMAC wire-format fixture tests** on BOTH sides with matching hex. Previous test only checked length; drift was invisible.
+- **Length caps + control-char sanitization** on model-supplied path/reason before journal emit.
+- **Dead wrapper cleanup** — `ClaudeCode::start` + `spawn_process` removed; tool-string logic extracted into one `compute_allowed_tools` fn (the "MUST mirror" duplication comment is gone).
+- **Dropped-log-line watcher:** tracing-appender's `error_counter` is polled every 60s and surfaced via `warn!` when it advances. Post-mortems can now tell "nothing happened" from "we lost N lines."
+- **Size-cap rotation illusion removed:** the earlier 100 MiB "rotation" was a no-op (Unix rename keeps the fd on the same inode); we now ship daily-only rotation and document the gap honestly. Real size caps via `file-rotate` crate are a tracked follow-up.
 
 Shipped:
 - Guardian binary + tests + break-glass CLI with pause/resume/status/**override-once**

@@ -249,11 +249,15 @@ impl BotState {
                     }
                 }
             }
-            let claude_code = match ClaudeCode::start(
+            // Phase 0 plumbing fix: pass the shadow-mode flag through.
+            // Before: ClaudeCode::start hardcoded use_protected_write=false,
+            // making `nova_use_protected_write` a dead knob.
+            let claude_code = match ClaudeCode::start_with_guardian(
                 prompt,
                 session_file,
                 config.full_permissions,
                 config.tools_override.clone(),
+                config.nova_use_protected_write,
             ) {
                 Ok(cc) => cc,
                 Err(e) => {
@@ -523,24 +527,22 @@ fn parse_args() -> (bool, String) {
     (wrapper_mode, config_path)
 }
 
-/// Maximum size a single `claudir.log.*` file may reach before the sweeper
-/// force-rotates it. Matches the 100 MiB cap called out in the Phase 0
-/// design doc.
-const LOG_ROTATE_MAX_BYTES: u64 = 100 * 1024 * 1024;
-
-/// Retention + size-cap sweeper for `claudir.log.*`.
+/// Retention sweeper for `claudir.log.*`. Deletes files older than
+/// `max_age_days`.
 ///
-/// Two passes on every tick:
-/// 1. **Age-based deletion.** Anything older than `max_age_days` is removed.
-/// 2. **Size-based force rotation.** If a file exceeds `LOG_ROTATE_MAX_BYTES`,
-///    it's renamed with a `.oversized-<unix_ts>` suffix. The rename is what
-///    closes the "100 MB intra-day burst" gap called out in the Eng review
-///    (TG1): `tracing-appender::rolling::daily` normally only rotates at UTC
-///    midnight, but renaming its open file on disk forces it to reopen the
-///    target on the next write and start a fresh file.
+/// **Honest status on size caps:** an earlier version of this function
+/// attempted a "size cap" by renaming files >100 MiB to trigger mid-day
+/// rotation. The /review performance specialist flagged this as a no-op:
+/// Unix `rename` keeps the file descriptor pointing at the same inode, so
+/// `tracing-appender::rolling::daily` continues writing to the same file
+/// under its new name. No actual rotation happens until UTC midnight.
 ///
-/// Best-effort throughout: per-file errors are logged via `tracing::warn!`
-/// and skipped. Phase 0 rule: observability must not kill the engine.
+/// Rather than ship a theatrical size cap, we removed it. Phase 0 now has
+/// **daily rotation + 7-day retention, and nothing more**. Size caps are
+/// tracked in TODOS.md as a follow-up (needs the `file-rotate` crate or a
+/// custom `MakeWriter` that checks size on each write and reopens). A
+/// 100 MiB intra-day burst WILL exceed the cap documented in the Phase 0
+/// design doc until that follow-up ships.
 async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()> {
     let cutoff = std::time::SystemTime::now()
         .checked_sub(Duration::from_secs(max_age_days * 24 * 60 * 60))
@@ -548,15 +550,12 @@ async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()
 
     let mut read_dir = tokio::fs::read_dir(log_dir).await?;
     let mut deleted = 0usize;
-    let mut oversized = 0usize;
     while let Some(entry) = read_dir.next_entry().await? {
         let path = entry.path();
         let name = match path.file_name().and_then(|n| n.to_str()) {
             Some(n) => n.to_string(),
             None => continue,
         };
-        // Match `claudir.log` itself or `claudir.log.<suffix>` (daily stamp /
-        // oversized-rotated file).
         if !name.starts_with("claudir.log") {
             continue;
         }
@@ -571,43 +570,11 @@ async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()
             Ok(t) => t,
             Err(_) => continue,
         };
-
-        // Pass 1: age-based deletion.
         if mtime < cutoff {
             if let Err(e) = tokio::fs::remove_file(&path).await {
                 warn!("log sweeper: remove {} failed: {}", path.display(), e);
             } else {
                 deleted += 1;
-            }
-            continue;
-        }
-
-        // Pass 2: size-based force rotation. Skip files we already renamed.
-        if name.contains(".oversized-") {
-            continue;
-        }
-        if meta.len() > LOG_ROTATE_MAX_BYTES {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let rotated = path.with_file_name(format!("{}.oversized-{}", name, ts));
-            if let Err(e) = tokio::fs::rename(&path, &rotated).await {
-                warn!(
-                    "log sweeper: size rotate {} -> {} failed: {}",
-                    path.display(),
-                    rotated.display(),
-                    e
-                );
-            } else {
-                oversized += 1;
-                info!(
-                    "log sweeper: force-rotated {} ({} bytes > {} cap) -> {}",
-                    path.display(),
-                    meta.len(),
-                    LOG_ROTATE_MAX_BYTES,
-                    rotated.display()
-                );
             }
         }
     }
@@ -616,9 +583,6 @@ async fn sweep_old_logs(log_dir: &Path, max_age_days: u64) -> std::io::Result<()
             "log sweeper: removed {} files older than {} days",
             deleted, max_age_days
         );
-    }
-    if oversized > 0 {
-        info!("log sweeper: force-rotated {} oversized files", oversized);
     }
     Ok(())
 }
@@ -636,24 +600,28 @@ async fn main() {
 
     // Setup logging — Phase 0 log rotation.
     //
-    // Uses `tracing_appender::rolling::daily` to rotate log files at UTC
-    // midnight. The rotating writer auto-creates the target directory
-    // and appends to `claudir.log.YYYY-MM-DD`.
-    //
-    // Known limitation (tracked in TODOS.md): this rotates on TIME only,
-    // not on size. A 100 MB intra-day burst will still produce a single
-    // large file until midnight. The Eng review flagged this (TG1) and
-    // called for either the `file-rotate` crate or a custom `MakeWriter`
-    // with size caps. Until that lands, daily + 7-day retention is the
-    // interim shape; it's strictly better than the pre-Phase-0 state
-    // (one unrotated log forever).
-    //
-    // Retention: a background task deletes claudir.log.* files older
+    // `tracing_appender::rolling::daily` rotates log files at UTC midnight
+    // into `claudir.log.YYYY-MM-DD`. Retention sweeper deletes files older
     // than 7 days once per hour.
+    //
+    // **Known gap (tracked in TODOS.md):** no size cap. A 100 MB intra-day
+    // burst will still produce a single large file until midnight. /review
+    // performance specialist confirmed that attempting a rename-based
+    // size-rotation is a no-op because Unix rename keeps the file
+    // descriptor on the same inode. A proper fix needs the `file-rotate`
+    // crate or a custom `MakeWriter` — follow-up PR.
+    //
+    // **Dropped-line visibility:** `tracing-appender::non_blocking` uses a
+    // bounded channel (default 128k lines) and defaults to `is_lossy=true`,
+    // meaning bursts silently drop entries. The returned `NonBlocking`
+    // exposes an `error_counter()` that tracks dropped lines. We sample it
+    // every 60 seconds and log a `warn!` when the counter advances, so a
+    // post-mortem can distinguish "nothing happened" from "we lost N lines."
     let log_dir = config.data_dir.join("logs");
     std::fs::create_dir_all(&log_dir).ok();
     let file_appender = tracing_appender::rolling::daily(&log_dir, "claudir.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let error_counter = non_blocking.error_counter();
 
     // Spawn the retention sweeper.
     {
@@ -665,6 +633,27 @@ async fn main() {
                 interval.tick().await;
                 if let Err(e) = sweep_old_logs(&sweep_dir, 7).await {
                     tracing::warn!("log retention sweeper: {}", e);
+                }
+            }
+        });
+    }
+
+    // Spawn the dropped-line watcher.
+    {
+        tokio::spawn(async move {
+            let mut last_dropped: usize = 0;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                let now = error_counter.dropped_lines();
+                if now > last_dropped {
+                    tracing::warn!(
+                        dropped_since_last = now - last_dropped,
+                        dropped_total = now,
+                        "tracing_appender dropped log lines — increase buffer or switch to lossy=false"
+                    );
+                    last_dropped = now;
                 }
             }
         });

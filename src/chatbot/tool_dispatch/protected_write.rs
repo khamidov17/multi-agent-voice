@@ -13,6 +13,36 @@ use crate::chatbot::journal;
 use crate::guardian_client::WriteResult;
 use tokio::sync::Mutex;
 
+/// Cap on content size accepted from the model. 10 MiB is already generous;
+/// beyond that we refuse rather than let Nova allocate unbounded memory
+/// through this tool. /review adversarial flagged the unbounded copy path.
+const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Truncation cap for path/reason strings we echo into the journal. These
+/// become audit-log rows in SQLite; without a cap a 10 MB `reason` balloons
+/// the DB. `path` gets 4 KiB (filesystems allow longer but 99.9% of paths
+/// fit), `reason` gets 2 KiB (plenty for free-form rationale).
+const MAX_PATH_CHARS: usize = 4096;
+const MAX_REASON_CHARS: usize = 2048;
+
+/// UTF-8 safe character truncation with a trailing ellipsis when clipped.
+fn truncate_for_log(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+/// Strip newlines and ASCII control characters that could be used to forge
+/// fake log lines. /review security flagged journal log-injection.
+fn sanitize_for_log(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// Execute a `protected_write(path, content, reason)` request.
 ///
 /// Gate conditions:
@@ -93,6 +123,24 @@ pub(super) async fn execute_protected_write(
         );
     }
 
+    // Size cap: refuse oversized payloads before the base64 copy (which
+    // doubles memory). 10 MiB is already generous — Phase 0 writes are
+    // source files + memory blobs, not binaries. /review adversarial
+    // flagged an adversarial 10MB reason / 10MB content pair as an OOM path.
+    if content.len() > MAX_CONTENT_BYTES {
+        return tool_error(
+            tool_use_id,
+            "content_too_large",
+            &format!(
+                "content is {} bytes; cap is {} ({} MiB)",
+                content.len(),
+                MAX_CONTENT_BYTES,
+                MAX_CONTENT_BYTES / (1024 * 1024)
+            ),
+            "Split the write into smaller files, or compress the payload before sending.",
+        );
+    }
+
     // The guardian client's I/O is blocking; wrap in spawn_blocking so
     // we don't stall the tokio executor on a slow guardian.
     let client_arc: std::sync::Arc<crate::guardian_client::GuardianClient> =
@@ -129,10 +177,14 @@ pub(super) async fn execute_protected_write(
     };
 
     // Grab the journal connection once so we emit the right event type
-    // based on the write outcome.
+    // based on the write outcome. Strip control chars + cap length on
+    // model-sourced strings so they can't forge fake log lines or bloat
+    // the journal DB (/review security + adversarial).
     let db = database.lock().await;
     let conn = db.connection();
     let bot = config.bot_name.clone();
+    let safe_path = sanitize_for_log(&truncate_for_log(path, MAX_PATH_CHARS));
+    let safe_reason = sanitize_for_log(&truncate_for_log(reason, MAX_REASON_CHARS));
 
     match write_result {
         WriteResult::Ok { written_bytes } => {
@@ -141,9 +193,9 @@ pub(super) async fn execute_protected_write(
                 None,
                 journal::ENTRY_GUARDIAN_ALLOW,
                 &format!("guardian.allow: wrote {} bytes", written_bytes),
-                &format!("path={} reason={}", path, reason),
+                &format!("path={} reason={}", safe_path, safe_reason),
                 &[],
-                &[bot, path.to_string()],
+                &[bot, safe_path.clone()],
             );
             let body = serde_json::json!({
                 "ok": true,
@@ -165,9 +217,9 @@ pub(super) async fn execute_protected_write(
                 None,
                 journal::ENTRY_GUARDIAN_DENY,
                 &format!("guardian.deny: {}", denial_reason),
-                &format!("path={} reason={}", path, reason),
+                &format!("path={} reason={}", safe_path, safe_reason),
                 &[],
-                &[bot, path.to_string()],
+                &[bot, safe_path.clone()],
             );
             let body = serde_json::json!({
                 "ok": false,
@@ -193,9 +245,9 @@ pub(super) async fn execute_protected_write(
                 None,
                 journal::ENTRY_GUARDIAN_ERROR,
                 &format!("guardian.error: {} ({})", code, message),
-                &format!("path={} reason={}", path, reason),
+                &format!("path={} reason={}", safe_path, safe_reason),
                 &[],
-                &[bot, path.to_string()],
+                &[bot, safe_path.clone()],
             );
             let body = serde_json::json!({
                 "ok": false,

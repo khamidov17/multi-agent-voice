@@ -127,7 +127,10 @@ impl GuardianClient {
     pub fn protected_write(&self, path: &str, content: &[u8], reason: &str) -> Result<WriteResult> {
         use base64::Engine;
 
-        let nonce = self.nonce.fetch_add(1, Ordering::SeqCst);
+        // Nonce requires only per-request uniqueness; no happens-before ordering
+        // against any other atomic. Relaxed is correct and avoids the ARM full-
+        // barrier that SeqCst would impose (/review performance specialist).
+        let nonce = self.nonce.fetch_add(1, Ordering::Relaxed);
         let hmac = compute_hmac(&self.key, "write", path, content, nonce);
         let req = Req {
             op: "write".to_string(),
@@ -143,7 +146,10 @@ impl GuardianClient {
 
     /// Cheap health check. Returns `true` if the guardian answers `ok`.
     pub fn ping(&self) -> Result<bool> {
-        let nonce = self.nonce.fetch_add(1, Ordering::SeqCst);
+        // Nonce requires only per-request uniqueness; no happens-before ordering
+        // against any other atomic. Relaxed is correct and avoids the ARM full-
+        // barrier that SeqCst would impose (/review performance specialist).
+        let nonce = self.nonce.fetch_add(1, Ordering::Relaxed);
         let hmac = compute_hmac(&self.key, "ping", "", &[], nonce);
         let req = Req {
             op: "ping".to_string(),
@@ -288,14 +294,36 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// **Cross-crate wire-compat pin.** Paired with
+    /// `bootstrap-guardian/src/auth.rs::tests::hmac_wire_fixture_write_op`.
+    /// Both tests assert the same hex over the same fixture inputs. If the
+    /// two implementations drift (tag string, separator, hash order, nonce
+    /// endianness), at least one side's test fails loudly at CI time — long
+    /// before any runtime BadHmac would surface.
+    ///
+    /// The prior version of this test only checked `got.len() == 64`, which
+    /// would have let a whole class of protocol drift through (/review
+    /// testing + maintainability + api-contract specialists all flagged it).
     #[test]
-    fn hmac_matches_guardian_format() {
-        // Must match bootstrap-guardian/src/auth.rs::compute_hmac exactly.
-        // Known-good fixture from the guardian crate's own test.
+    fn hmac_wire_fixture_write_op() {
         let key: Vec<u8> = (0..64).collect();
-        // Shape test: op "write" + path "/a" + bytes b"x" + nonce 1
         let got = compute_hmac(&key, "write", "/a", b"x", 1);
-        assert_eq!(got.len(), 64, "sha-256 hex = 64 chars");
+        assert_eq!(
+            got, "c28f43f14294ab137e3be1662eb17ad95057fc90af682ef6df2fdbf880613892",
+            "HMAC wire format drift! This value MUST match \
+             bootstrap-guardian/src/auth.rs::hmac_wire_fixture_write_op. \
+             If the protocol changed deliberately, update BOTH tests."
+        );
+    }
+
+    #[test]
+    fn hmac_wire_fixture_ping_op() {
+        let key: Vec<u8> = (0..64).collect();
+        let got = compute_hmac(&key, "ping", "", &[], 1);
+        assert_eq!(
+            got, "4f4a2d97f99a96ddeffd284dea1e6a5136cf09b328636fdeab76c5965d2d1615",
+            "HMAC wire format for Ping drifted. Update both tests."
+        );
     }
 
     #[test]
