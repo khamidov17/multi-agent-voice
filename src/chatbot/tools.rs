@@ -652,6 +652,52 @@ pub enum ToolCall {
         reason: String,
     },
 
+    /// Phase 1 — read currently open bug alerts from the shared
+    /// `bug_alerts.db`. Intended for Nova's cognitive-loop triage pass.
+    /// Returns rows ordered critical → low, then most-recent-first, so
+    /// Nova can focus on what matters.
+    ReadAlerts {
+        /// Optional ISO8601 timestamp lower-bound on `last_seen_at`.
+        since: Option<String>,
+        /// Optional category filter (e.g. `heartbeat.gap`,
+        /// `journal.guardian.error`, `telegram.error`).
+        category: Option<String>,
+        /// Max rows to return. Defaults to 50 when None. Caps at 200.
+        limit: Option<i64>,
+    },
+
+    /// Phase 1 — mark a batch of alerts as triaged. Atomic: either all
+    /// requested ids get the triaged_at stamp, or the call fails and
+    /// none do (SQLite transaction). A retriggered alert (same
+    /// fingerprint fires again after being triaged) clears the stamp
+    /// automatically, so regressions re-surface.
+    MarkTriaged {
+        /// Alert IDs to close. These come from `read_alerts` rows.
+        alert_ids: Vec<i64>,
+        /// Free-form note stored on each row for post-mortem context.
+        note: Option<String>,
+    },
+
+    /// Phase 1 — produce a Telegram-markdown triage report from the
+    /// currently open alerts and send it to the owner. This consolidates
+    /// the alerts Nova just read + reasoned about into one human-readable
+    /// summary. Nova's prompt describes the categories in summary terms;
+    /// the actual markdown formatting happens harness-side so we get
+    /// stable output.
+    SendTriageReport {
+        /// Owner chat_id to send to (always the owner's DM id in
+        /// practice, enforced by the dispatch handler).
+        chat_id: i64,
+        /// Free-form lead-in Nova writes. Appears ABOVE the auto-generated
+        /// alert list. Empty string = just the list.
+        preamble: String,
+        /// If true, alert ids included in the report are automatically
+        /// marked triaged after the send succeeds. Avoids a second
+        /// round-trip to `mark_triaged`.
+        #[serde(default)]
+        auto_mark_triaged: bool,
+    },
+
     /// Parse error - tool call couldn't be parsed. Error message will be sent back to model.
     #[serde(skip)]
     ParseError { message: String },
@@ -1636,6 +1682,68 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["path", "content", "reason"]
             }),
         },
+        Tool {
+            name: "read_alerts".to_string(),
+            description: "Phase 1 — read currently open bug alerts from the shared `bug_alerts.db`. Returns a JSON array of rows sorted critical→low then most-recent-first. Each row has: id, fingerprint, detected_by, severity (critical/high/medium/low), category, summary, evidence (structured JSON blob), first_seen_at, last_seen_at, count (how many times this fingerprint fired). Use this in your cognitive-loop triage pass to decide what to report to the owner. Call `mark_triaged` or `send_triage_report` (with auto_mark_triaged=true) to close the ones you handled.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "since": {
+                        "type": "string",
+                        "description": "Optional ISO8601 timestamp lower-bound on last_seen_at. E.g. '2026-04-21T10:00:00'. Use this to limit triage to recent alerts."
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional category filter. Values: 'heartbeat.gap', 'journal.guardian.error', 'journal.subprocess.exit', 'telegram.error', etc. Omit to see all categories."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows returned. Defaults to 50. Capped at 200 server-side."
+                    }
+                }
+            }),
+        },
+        Tool {
+            name: "mark_triaged".to_string(),
+            description: "Phase 1 — mark one or more alerts as triaged so they stop appearing in `read_alerts` results. The rows stay in the DB for post-mortem; only the open/closed state changes. If the same bug re-occurs (same fingerprint), the alert re-surfaces automatically. Use this AFTER you have either reported the alert to the owner or decided it was a false positive. `note` is stored on every closed row for future readers.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "alert_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Alert IDs from `read_alerts`. Must be non-empty."
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": "Free-form triage note (e.g. 'reported to owner at 14:22', 'benign — sleep cycle'). Stored on every closed row."
+                    }
+                },
+                "required": ["alert_ids"]
+            }),
+        },
+        Tool {
+            name: "send_triage_report".to_string(),
+            description: "Phase 1 — send a consolidated Telegram DM to the owner summarizing the currently open bug alerts. The harness formats the alert list as markdown (severity badges, counts, last_seen times, short evidence preview) and appends it to your `preamble`. When `auto_mark_triaged` is true, all alerts included in the report are closed atomically after the send succeeds — don't forget to read them first with `read_alerts`. Use this for end-of-triage summaries or on-demand status replies to the owner.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "type": "integer",
+                        "description": "Owner's DM chat_id. The dispatch refuses non-owner targets."
+                    },
+                    "preamble": {
+                        "type": "string",
+                        "description": "Your own lead-in text, shown above the auto-generated alert list. Can be empty."
+                    },
+                    "auto_mark_triaged": {
+                        "type": "boolean",
+                        "description": "Close all alerts included in the report after the Telegram send succeeds. Default false."
+                    }
+                },
+                "required": ["chat_id", "preamble"]
+            }),
+        },
     ]
 }
 
@@ -1698,12 +1806,21 @@ mod tests {
         );
         // Exact count — update this when adding/removing tools.
         // Phase 0 added one tool: protected_write. Was 70 pre-Phase-0.
+        // Phase 1 added three: read_alerts, mark_triaged, send_triage_report.
         assert_eq!(
             tools.len(),
-            71,
+            74,
             "Tool count changed — update this test. Tools: {:?}",
             names
         );
+        // Phase 1 triage tools must be present and discoverable by Nova.
+        for expected in ["read_alerts", "mark_triaged", "send_triage_report"] {
+            assert!(
+                names.contains(&expected),
+                "Phase 1 tool `{}` missing from get_tool_definitions",
+                expected
+            );
+        }
     }
 
     #[test]
