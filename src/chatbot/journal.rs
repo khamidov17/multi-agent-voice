@@ -43,6 +43,15 @@ pub const ENTRY_GUARDIAN_ERROR: &str = "guardian.error";
 /// Use this for observability events that are additive and tolerable to
 /// lose on disk pressure / mutex poison. For critical audit writes
 /// (billing, security), keep calling `add_entry` and handle the `Result`.
+///
+/// **Prefer [`JournalWriter::emit`] for Phase 0 hot-path events.** This
+/// function acquires the engine's journal `Mutex<Connection>` synchronously
+/// and executes SQLite INSERT under it, so two concurrent callers serialize
+/// at this point. The async-writer path lets the hot path just push to a
+/// channel and return immediately. See the HC2 finding in the review
+/// history — this function is retained for back-compat with the engine's
+/// existing journal writes (compress, search) that don't live in the
+/// per-tool-call hot path.
 pub fn emit(
     conn: &std::sync::Mutex<rusqlite::Connection>,
     task_id: Option<&str>,
@@ -67,6 +76,147 @@ pub fn emit(
             err = %e,
             "journal emit failed (non-fatal); observability will miss this event"
         );
+    }
+}
+
+/// Event payload buffered in the async journal writer channel.
+/// Owned strings so the producer can drop references immediately.
+#[derive(Debug)]
+pub struct JournalEvent {
+    pub task_id: Option<String>,
+    pub entry_type: String,
+    pub summary: String,
+    pub detail: String,
+    pub participants: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+/// Cap on the pending-event queue. 4096 is comfortably above any realistic
+/// burst (3 bots × dual-lane × 10 concurrent tool calls ≈ 60 in flight).
+/// When the queue is full, we DROP + log rather than blocking the hot path.
+/// Phase 0 rule: observability must not kill the engine.
+const JOURNAL_WRITER_QUEUE_CAP: usize = 4096;
+
+/// Async journal writer. Callers push events via [`JournalWriter::emit`] —
+/// non-blocking, no shared lock held at the call site. A background tokio
+/// task drains the channel and executes SQLite INSERTs, holding the
+/// journal's `Mutex<Connection>` ONLY during the INSERT itself.
+///
+/// Closes the HC2 finding from the /autoplan Eng review: previously the
+/// dispatch-layer `emit()` call held `Mutex<Database>` across the synchronous
+/// SQLite insert, serializing all dual-lane tool calls at that point. With
+/// this type, the hot path is a `send()` + drop.
+///
+/// Construct via [`JournalWriter::spawn`] from `main.rs` alongside the
+/// `Database`. Pass into `ChatbotConfig.journal_writer` so dispatch-layer
+/// observability can use it.
+pub struct JournalWriter {
+    tx: tokio::sync::mpsc::Sender<JournalEvent>,
+}
+
+impl std::fmt::Debug for JournalWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JournalWriter")
+            .field("queue_cap", &JOURNAL_WRITER_QUEUE_CAP)
+            .finish()
+    }
+}
+
+impl JournalWriter {
+    /// Spawn the background writer task with a fresh SQLite connection
+    /// pointing at the same file as the engine's `Database`. The journal
+    /// table is expected to already exist (the engine's own boot created
+    /// it). Using a separate connection means the writer never contends
+    /// with the engine's `Mutex<Connection>` at all — only with the
+    /// SQLite WAL itself, which supports multiple writers fine for
+    /// append-only workloads like this one.
+    pub fn spawn_with_path(db_path: &std::path::Path) -> anyhow::Result<Self> {
+        let conn = rusqlite::Connection::open(db_path)?;
+        // Make sure WAL is on so we don't collide with the engine's reads/writes.
+        conn.pragma_update(None, "journal_mode", "WAL").ok();
+        // Ensure the table exists (idempotent) so a journal event fired
+        // before the engine's own init doesn't error.
+        create_journal_table(&conn)?;
+        Ok(Self::spawn(std::sync::Arc::new(std::sync::Mutex::new(conn))))
+    }
+
+    /// Spawn with an already-opened connection wrapped in Arc<Mutex<>>.
+    /// Primarily used by tests that want to assert the writer drained.
+    pub fn spawn(conn: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<JournalEvent>(JOURNAL_WRITER_QUEUE_CAP);
+        tokio::spawn(async move {
+            let mut drained = 0usize;
+            while let Some(ev) = rx.recv().await {
+                drained += 1;
+                // Run the blocking SQLite write on a blocking thread so a
+                // slow fsync doesn't stall the tokio reactor.
+                let conn = std::sync::Arc::clone(&conn);
+                let result = tokio::task::spawn_blocking(move || {
+                    add_entry(
+                        &conn,
+                        ev.task_id.as_deref(),
+                        &ev.entry_type,
+                        &ev.summary,
+                        &ev.detail,
+                        &ev.participants,
+                        &ev.tags,
+                    )
+                })
+                .await;
+                match result {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(err = %e, drained, "journal writer: add_entry failed");
+                    }
+                    Err(join_err) => {
+                        tracing::error!(err = %join_err, "journal writer: spawn_blocking panicked");
+                    }
+                }
+            }
+            tracing::info!(drained, "journal writer channel closed; draining thread exiting");
+        });
+        Self { tx }
+    }
+
+    /// Push an event into the writer queue. Non-blocking at the call site.
+    ///
+    /// If the queue is full (producer outpaces SQLite writes), we DROP
+    /// the event and emit a `warn!` with the dropped count. This is
+    /// deliberate: Phase 0 observability must never block the engine's
+    /// hot path. Alternative behaviors (backpressure, async-wait) would
+    /// trade log completeness for engine latency — wrong trade-off for
+    /// Phase 0 where the journal is a forensic aid, not a billing audit.
+    pub fn emit(
+        &self,
+        task_id: Option<&str>,
+        entry_type: &str,
+        summary: &str,
+        detail: &str,
+        participants: &[String],
+        tags: &[String],
+    ) {
+        let ev = JournalEvent {
+            task_id: task_id.map(|s| s.to_string()),
+            entry_type: entry_type.to_string(),
+            summary: summary.to_string(),
+            detail: detail.to_string(),
+            participants: participants.to_vec(),
+            tags: tags.to_vec(),
+        };
+        match self.tx.try_send(ev) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(ev)) => {
+                tracing::warn!(
+                    entry_type = %ev.entry_type,
+                    summary = %ev.summary,
+                    "journal writer queue full (cap {}); dropping event",
+                    JOURNAL_WRITER_QUEUE_CAP
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::error!("journal writer channel closed; event lost");
+            }
+        }
     }
 }
 
@@ -502,5 +652,102 @@ mod tests {
         assert!(result.is_err(), "poisoned mutex must produce Err, not panic");
         // emit also must not panic on a poisoned mutex.
         emit(&conn, None, ENTRY_TOOL_CALL, "s", "d", &[], &[]);
+    }
+
+    // ---- HC2 JournalWriter tests ----
+    //
+    // Async tests; need a tokio runtime. The writer's spawn() expects an
+    // active tokio context (calls tokio::spawn internally). Each test
+    // uses `#[tokio::test]`.
+
+    #[tokio::test]
+    async fn writer_drains_events_to_db() {
+        let conn = std::sync::Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        ));
+        create_journal_table(&conn.lock().unwrap()).unwrap();
+        let writer = JournalWriter::spawn(std::sync::Arc::clone(&conn));
+        writer.emit(
+            None,
+            ENTRY_TOOL_CALL,
+            "first",
+            "d1",
+            &[],
+            &["nova".to_string()],
+        );
+        writer.emit(
+            None,
+            ENTRY_GUARDIAN_ALLOW,
+            "second",
+            "d2",
+            &[],
+            &["nova".to_string()],
+        );
+        // Drop the writer so the channel closes and the background task exits.
+        drop(writer);
+        // Give the drain task a beat — in practice this is microseconds.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let rows: i64 = conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM journal", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "writer must drain both events to SQLite");
+    }
+
+    #[tokio::test]
+    async fn writer_emit_does_not_block_on_slow_db() {
+        // The whole point of HC2: writer.emit() must return immediately
+        // regardless of how slow the SQLite insert is. We can't actually
+        // make SQLite slow in-memory, but we can measure that emit() on a
+        // working writer completes in under 1ms even with many events
+        // queued — the channel send is O(1).
+        let conn = std::sync::Arc::new(std::sync::Mutex::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        ));
+        create_journal_table(&conn.lock().unwrap()).unwrap();
+        let writer = JournalWriter::spawn(std::sync::Arc::clone(&conn));
+        let start = std::time::Instant::now();
+        for i in 0..100 {
+            writer.emit(
+                None,
+                ENTRY_TOOL_CALL,
+                &format!("ev-{}", i),
+                "",
+                &[],
+                &[],
+            );
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "emit() must not block — 100 events took {:?}",
+            elapsed
+        );
+        drop(writer);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let rows: i64 = conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM journal", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 100, "all 100 events must eventually land in SQLite");
+    }
+
+    #[tokio::test]
+    async fn writer_with_path_creates_table_if_missing() {
+        let td = tempfile::tempdir().unwrap();
+        let db = td.path().join("journal.db");
+        // Spawn without pre-creating the table — spawn_with_path must do it.
+        let writer = JournalWriter::spawn_with_path(&db).unwrap();
+        writer.emit(None, ENTRY_TOOL_CALL, "s", "d", &[], &[]);
+        drop(writer);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Verify table exists + has the row.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM journal", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
     }
 }

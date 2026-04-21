@@ -176,27 +176,57 @@ pub(super) async fn execute_protected_write(
         }
     };
 
-    // Grab the journal connection once so we emit the right event type
-    // based on the write outcome. Strip control chars + cap length on
-    // model-sourced strings so they can't forge fake log lines or bloat
-    // the journal DB (/review security + adversarial).
-    let db = database.lock().await;
-    let conn = db.connection();
+    // Emit a journal event for every outcome. Prefer the async
+    // `JournalWriter` (HC2 fix) so the hot path doesn't hold
+    // `Mutex<Database>` across the SQLite insert. Fall back to the
+    // synchronous path when the writer isn't wired (tests, bootstrap
+    // race). The fallback holds `database.lock().await` for the duration
+    // of the INSERT — correct but slower; it's the bit HC2 fixes for
+    // production dispatch.
     let bot = config.bot_name.clone();
     let safe_path = sanitize_for_log(&truncate_for_log(path, MAX_PATH_CHARS));
     let safe_reason = sanitize_for_log(&truncate_for_log(reason, MAX_REASON_CHARS));
+    let tags = [bot, safe_path.clone()];
 
+    // Compute outcome-specific (entry_type, summary, detail) once so the
+    // async-vs-sync emit branches below share strings.
+    let (event_entry, event_summary, event_detail) = match &write_result {
+        WriteResult::Ok { written_bytes } => (
+            journal::ENTRY_GUARDIAN_ALLOW,
+            format!("guardian.allow: wrote {} bytes", written_bytes),
+            format!("path={} reason={}", safe_path, safe_reason),
+        ),
+        WriteResult::Denied {
+            reason: denial_reason,
+            ..
+        } => (
+            journal::ENTRY_GUARDIAN_DENY,
+            format!("guardian.deny: {}", denial_reason),
+            format!("path={} reason={}", safe_path, safe_reason),
+        ),
+        WriteResult::Err {
+            code, message, ..
+        } => (
+            journal::ENTRY_GUARDIAN_ERROR,
+            format!("guardian.error: {} ({})", code.as_str(), message),
+            format!("path={} reason={}", safe_path, safe_reason),
+        ),
+    };
+
+    if let Some(writer) = &config.journal_writer {
+        writer.emit(None, event_entry, &event_summary, &event_detail, &[], &tags);
+    } else {
+        let db = database.lock().await;
+        let conn = db.connection();
+        journal::emit(conn, None, event_entry, &event_summary, &event_detail, &[], &tags);
+    }
+
+    // Build the tool result body from the typed write outcome. The
+    // journal emission above is already fire-and-forget (via JournalWriter)
+    // or sync-and-dropped (fallback), so this match only shapes the
+    // caller-facing response.
     match write_result {
         WriteResult::Ok { written_bytes } => {
-            journal::emit(
-                conn,
-                None,
-                journal::ENTRY_GUARDIAN_ALLOW,
-                &format!("guardian.allow: wrote {} bytes", written_bytes),
-                &format!("path={} reason={}", safe_path, safe_reason),
-                &[],
-                &[bot, safe_path.clone()],
-            );
             let body = serde_json::json!({
                 "ok": true,
                 "written_bytes": written_bytes,
@@ -212,15 +242,6 @@ pub(super) async fn execute_protected_write(
             reason: denial_reason,
             alternatives,
         } => {
-            journal::emit(
-                conn,
-                None,
-                journal::ENTRY_GUARDIAN_DENY,
-                &format!("guardian.deny: {}", denial_reason),
-                &format!("path={} reason={}", safe_path, safe_reason),
-                &[],
-                &[bot, safe_path.clone()],
-            );
             let body = serde_json::json!({
                 "ok": false,
                 "err_code": "denied",
@@ -240,19 +261,9 @@ pub(super) async fn execute_protected_write(
             message,
             suggested_action,
         } => {
-            let code_str = code.as_str();
-            journal::emit(
-                conn,
-                None,
-                journal::ENTRY_GUARDIAN_ERROR,
-                &format!("guardian.error: {} ({})", code_str, message),
-                &format!("path={} reason={}", safe_path, safe_reason),
-                &[],
-                &[bot, safe_path.clone()],
-            );
             let body = serde_json::json!({
                 "ok": false,
-                "err_code": code_str,
+                "err_code": code.as_str(),
                 "message": message,
                 "suggested_action": suggested_action,
             });

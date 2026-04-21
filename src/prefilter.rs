@@ -86,6 +86,10 @@ mod tests {
         }
     }
 
+    // NOTE: prefilter's test_config() builds a `Config` (the JSON/runtime
+    // config) which does NOT include `journal_writer`. That field lives on
+    // `ChatbotConfig` (the engine's per-bot struct). No change needed here.
+
     #[test]
     fn test_obvious_spam() {
         let config = test_config();
