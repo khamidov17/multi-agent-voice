@@ -7,6 +7,7 @@ mod moderation;
 mod planning;
 mod protected_write;
 mod reflection;
+mod triage;
 mod tools_custom;
 mod utility;
 
@@ -675,6 +676,28 @@ pub(crate) async fn execute_tool(
                 &tc.id, config, database, path, content, reason,
             )
             .await;
+        }
+        ToolCall::ReadAlerts {
+            since,
+            category,
+            limit,
+        } => triage::execute_read_alerts(config, since.as_deref(), category.as_deref(), *limit),
+        ToolCall::MarkTriaged { alert_ids, note } => {
+            triage::execute_mark_triaged(config, alert_ids, note.as_deref())
+        }
+        ToolCall::SendTriageReport {
+            chat_id,
+            preamble,
+            auto_mark_triaged,
+        } => {
+            triage::execute_send_triage_report(
+                config,
+                telegram,
+                *chat_id,
+                preamble,
+                *auto_mark_triaged,
+            )
+            .await
         }
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),

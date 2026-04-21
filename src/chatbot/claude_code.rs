@@ -553,6 +553,20 @@ struct RawToolCall {
     // protected_write field (path + content reuse memory-tool fields above)
     #[serde(default)]
     reason: Option<String>,
+    // Phase 1 triage-tool fields. `limit` is NOT redeclared — it's shared
+    // with the existing `get_members`/`search_memories` limit knob above.
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    alert_ids: Option<Vec<i64>>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    preamble: Option<String>,
+    #[serde(default)]
+    auto_mark_triaged: Option<bool>,
     // send_voice fields
     #[serde(default)]
     voice: Option<String>,
@@ -748,8 +762,28 @@ impl RawToolCall {
                     content: self.content.clone().ok_or("protected_write requires content")?,
                     reason: self.reason.clone().ok_or("protected_write requires reason")?,
                 }),
+                "read_alerts" => Ok(ToolCall::ReadAlerts {
+                    since: self.since.clone(),
+                    category: self.category.clone(),
+                    limit: self.limit,
+                }),
+                "mark_triaged" => Ok(ToolCall::MarkTriaged {
+                    alert_ids: self
+                        .alert_ids
+                        .clone()
+                        .ok_or("mark_triaged requires alert_ids")?,
+                    note: self.note.clone(),
+                }),
+                "send_triage_report" => Ok(ToolCall::SendTriageReport {
+                    chat_id: self.chat_id.ok_or("send_triage_report requires chat_id")?,
+                    preamble: self
+                        .preamble
+                        .clone()
+                        .ok_or("send_triage_report requires preamble")?,
+                    auto_mark_triaged: self.auto_mark_triaged.unwrap_or(false),
+                }),
                 "WebSearch" => Err("WebSearch is a Claude Code built-in tool. Use it BEFORE outputting tool_calls (it runs automatically when you search). Don't include it in the tool_calls array.".to_string()),
-                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, fetch_url, send_music, edit_message, send_poll, unban_user, set_reminder, list_reminders, cancel_reminder, yandex_geocode, yandex_map, now, report_bug, done, protected_write", self.tool)),
+                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, fetch_url, send_music, edit_message, send_poll, unban_user, set_reminder, list_reminders, cancel_reminder, yandex_geocode, yandex_map, now, report_bug, done, protected_write, read_alerts, mark_triaged, send_triage_report", self.tool)),
             }
         };
 

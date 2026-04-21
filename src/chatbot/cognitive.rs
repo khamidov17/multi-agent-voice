@@ -27,10 +27,16 @@ use crate::chatbot::metrics::MetricsCollector;
 const MODES: &[(&str, &str)] = &[
     (
         "MONITOR",
-        "Review recent activity. Check data/{bot}/logs/trio.log for errors or warnings in the last hour. \
-      Check data/shared/bot_messages.db for any unanswered messages or failed handoffs. \
-      Check heartbeats table — are all peer bots alive and responsive? \
-      If you find anomalies, report them to the group. If all clear, stop quickly.",
+        "Phase 1 triage pass. Call `read_alerts` (no args) to see what the heartbeat watchdog \
+      and journal scanner have detected since the last cognitive tick. For each open alert: \
+      - If critical or high AND owner would want to know, call `send_triage_report` with a \
+        short preamble summarizing what you found and set `auto_mark_triaged=true`. \
+      - If it's a benign/expected event (spurious gap under load, already-handled restart), \
+        call `mark_triaged` with `alert_ids` and a `note` explaining why. \
+      - If you're not sure, leave it open for the next tick. \
+      Keep preambles concrete (what broke, when, how bad) — no \"looking into it\" filler. \
+      Also: check data/shared/bot_messages.db for any unanswered messages or failed handoffs. \
+      If all clear, stop quickly.",
     ),
     (
         "IMPROVE",
