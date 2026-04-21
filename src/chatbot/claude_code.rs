@@ -567,6 +567,25 @@ struct RawToolCall {
     preamble: Option<String>,
     #[serde(default)]
     auto_mark_triaged: Option<bool>,
+    // Phase 2 fix-plan fields
+    #[serde(default)]
+    alert_id: Option<i64>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    root_cause: Option<String>,
+    #[serde(default)]
+    steps: Option<String>,
+    #[serde(default)]
+    risk: Option<String>,
+    #[serde(default)]
+    test_plan: Option<String>,
+    #[serde(default, rename = "status")]
+    fp_status: Option<String>,
+    #[serde(default)]
+    plan_id: Option<i64>,
+    #[serde(default)]
+    new_status: Option<String>,
     // send_voice fields
     #[serde(default)]
     voice: Option<String>,
@@ -782,8 +801,59 @@ impl RawToolCall {
                         .ok_or("send_triage_report requires preamble")?,
                     auto_mark_triaged: self.auto_mark_triaged.unwrap_or(false),
                 }),
+                "draft_fix_plan" => Ok(ToolCall::DraftFixPlan {
+                    alert_id: self
+                        .alert_id
+                        .ok_or("draft_fix_plan requires alert_id")?,
+                    title: self
+                        .title
+                        .clone()
+                        .ok_or("draft_fix_plan requires title")?,
+                    root_cause: self
+                        .root_cause
+                        .clone()
+                        .ok_or("draft_fix_plan requires root_cause")?,
+                    steps: self
+                        .steps
+                        .clone()
+                        .ok_or("draft_fix_plan requires steps")?,
+                    risk: self
+                        .risk
+                        .clone()
+                        .ok_or("draft_fix_plan requires risk")?,
+                    test_plan: self
+                        .test_plan
+                        .clone()
+                        .ok_or("draft_fix_plan requires test_plan")?,
+                }),
+                "list_fix_plans" => Ok(ToolCall::ListFixPlans {
+                    status: self.fp_status.clone(),
+                    limit: self.limit,
+                }),
+                "update_fix_plan_status" => Ok(ToolCall::UpdateFixPlanStatus {
+                    plan_id: self
+                        .plan_id
+                        .ok_or("update_fix_plan_status requires plan_id")?,
+                    new_status: self
+                        .new_status
+                        .clone()
+                        .ok_or("update_fix_plan_status requires new_status")?,
+                    note: self.note.clone(),
+                }),
+                "send_fix_plan_to_owner" => Ok(ToolCall::SendFixPlanToOwner {
+                    plan_id: self
+                        .plan_id
+                        .ok_or("send_fix_plan_to_owner requires plan_id")?,
+                    chat_id: self
+                        .chat_id
+                        .ok_or("send_fix_plan_to_owner requires chat_id")?,
+                    preamble: self
+                        .preamble
+                        .clone()
+                        .ok_or("send_fix_plan_to_owner requires preamble")?,
+                }),
                 "WebSearch" => Err("WebSearch is a Claude Code built-in tool. Use it BEFORE outputting tool_calls (it runs automatically when you search). Don't include it in the tool_calls array.".to_string()),
-                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, fetch_url, send_music, edit_message, send_poll, unban_user, set_reminder, list_reminders, cancel_reminder, yandex_geocode, yandex_map, now, report_bug, done, protected_write, read_alerts, mark_triaged, send_triage_report", self.tool)),
+                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, fetch_url, send_music, edit_message, send_poll, unban_user, set_reminder, list_reminders, cancel_reminder, yandex_geocode, yandex_map, now, report_bug, done, protected_write, read_alerts, mark_triaged, send_triage_report, draft_fix_plan, list_fix_plans, update_fix_plan_status, send_fix_plan_to_owner", self.tool)),
             }
         };
 

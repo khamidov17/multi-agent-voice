@@ -5,6 +5,7 @@ mod memory;
 mod messaging;
 mod moderation;
 mod planning;
+mod fix_plans;
 mod protected_write;
 mod reflection;
 mod triage;
@@ -696,6 +697,39 @@ pub(crate) async fn execute_tool(
                 *chat_id,
                 preamble,
                 *auto_mark_triaged,
+            )
+            .await
+        }
+        ToolCall::DraftFixPlan {
+            alert_id,
+            title,
+            root_cause,
+            steps,
+            risk,
+            test_plan,
+        } => fix_plans::execute_draft_fix_plan(
+            config, *alert_id, title, root_cause, steps, risk, test_plan,
+        ),
+        ToolCall::ListFixPlans { status, limit } => {
+            fix_plans::execute_list_fix_plans(config, status.as_deref(), *limit)
+        }
+        ToolCall::UpdateFixPlanStatus {
+            plan_id,
+            new_status,
+            note,
+        } => fix_plans::execute_update_fix_plan_status(
+            config,
+            *plan_id,
+            new_status,
+            note.as_deref(),
+        ),
+        ToolCall::SendFixPlanToOwner {
+            plan_id,
+            chat_id,
+            preamble,
+        } => {
+            fix_plans::execute_send_fix_plan_to_owner(
+                config, telegram, *plan_id, *chat_id, preamble,
             )
             .await
         }
