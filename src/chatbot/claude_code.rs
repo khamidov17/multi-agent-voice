@@ -586,6 +586,13 @@ struct RawToolCall {
     plan_id: Option<i64>,
     #[serde(default)]
     new_status: Option<String>,
+    // Phase 3 — implementation tool fields. `message` is NOT redeclared;
+    // it's shared with the reminder-tool field above (semantically
+    // different but structurally the same Option<String>).
+    #[serde(default)]
+    base_branch: Option<String>,
+    #[serde(default)]
+    draft: Option<bool>,
     // send_voice fields
     #[serde(default)]
     voice: Option<String>,
@@ -852,8 +859,28 @@ impl RawToolCall {
                         .clone()
                         .ok_or("send_fix_plan_to_owner requires preamble")?,
                 }),
+                "start_implementation" => Ok(ToolCall::StartImplementation {
+                    plan_id: self
+                        .plan_id
+                        .ok_or("start_implementation requires plan_id")?,
+                    base_branch: self.base_branch.clone(),
+                }),
+                "commit_and_push" => Ok(ToolCall::CommitAndPush {
+                    plan_id: self
+                        .plan_id
+                        .ok_or("commit_and_push requires plan_id")?,
+                    message: self
+                        .message
+                        .clone()
+                        .ok_or("commit_and_push requires message")?,
+                }),
+                "open_pr" => Ok(ToolCall::OpenPr {
+                    plan_id: self.plan_id.ok_or("open_pr requires plan_id")?,
+                    title: self.title.clone(),
+                    draft: self.draft.unwrap_or(false),
+                }),
                 "WebSearch" => Err("WebSearch is a Claude Code built-in tool. Use it BEFORE outputting tool_calls (it runs automatically when you search). Don't include it in the tool_calls array.".to_string()),
-                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, fetch_url, send_music, edit_message, send_poll, unban_user, set_reminder, list_reminders, cancel_reminder, yandex_geocode, yandex_map, now, report_bug, done, protected_write, read_alerts, mark_triaged, send_triage_report, draft_fix_plan, list_fix_plans, update_fix_plan_status, send_fix_plan_to_owner", self.tool)),
+                _ => Err(format!("Unknown tool: '{}'. Available tools: send_message, get_user_info, query, add_reaction, delete_message, mute_user, ban_user, kick_user, get_chat_admins, get_members, import_members, send_photo, send_voice, create_memory, read_memory, edit_memory, list_memories, search_memories, delete_memory, fetch_url, send_music, edit_message, send_poll, unban_user, set_reminder, list_reminders, cancel_reminder, yandex_geocode, yandex_map, now, report_bug, done, protected_write, read_alerts, mark_triaged, send_triage_report, draft_fix_plan, list_fix_plans, update_fix_plan_status, send_fix_plan_to_owner, start_implementation, commit_and_push, open_pr", self.tool)),
             }
         };
 

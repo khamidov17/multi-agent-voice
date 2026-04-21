@@ -84,6 +84,7 @@ mod tests {
             guardian_socket_path: None,
             guardian_key_path: None,
             nova_use_protected_write: false,
+            repo_path: None,
         }
     }
 

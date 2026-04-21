@@ -139,6 +139,13 @@ pub struct ChatbotConfig {
     /// `data/shared/bug_alerts.db` SQLite file. `None` means Phase 1
     /// is disabled (e.g., in unit tests or older bot configs).
     pub alerts_writer: Option<Arc<crate::chatbot::alerts::AlertsWriter>>,
+    /// Phase 3 — per-plan worktree manager. `None` disables Phase 3
+    /// tools (`start_implementation`, `commit_and_push`, `open_pr`),
+    /// which refuse with a structured error explaining setup. Present
+    /// on Tier 1 bots (Nova) with a configured `repo_path`. The
+    /// worktrees_root path MUST live inside the guardian's
+    /// `allowed_roots` — see `worktree.rs` for the invariant.
+    pub worktree_manager: Option<Arc<crate::chatbot::worktree::WorktreeManager>>,
 }
 
 impl Default for ChatbotConfig {
@@ -169,6 +176,7 @@ impl Default for ChatbotConfig {
             nova_use_protected_write: false,
             journal_writer: None,
             alerts_writer: None,
+            worktree_manager: None,
         }
     }
 }

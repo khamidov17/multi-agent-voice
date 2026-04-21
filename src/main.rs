@@ -255,6 +255,48 @@ impl BotState {
                         }
                     }
                 },
+                worktree_manager: {
+                    // Phase 3 — only Tier-1 bots get a worktree manager.
+                    // Atlas / Sentinel never open PRs, so their processes
+                    // don't construct one. Repo path comes from config,
+                    // falls back to cwd (common dev pattern).
+                    if !config.full_permissions {
+                        None
+                    } else {
+                        let repo_path = config.repo_path.clone().or_else(|| {
+                            std::env::current_dir().ok()
+                        });
+                        match repo_path {
+                            Some(rp) => {
+                                match crate::chatbot::worktree::WorktreeManager::new(
+                                    rp.clone(),
+                                    &config.data_dir,
+                                ) {
+                                    Ok(m) => {
+                                        info!(
+                                            repo = %m.repo_path.display(),
+                                            worktrees_root = %m.worktrees_root.display(),
+                                            "Phase 3 worktree manager ready"
+                                        );
+                                        Some(std::sync::Arc::new(m))
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            repo = %rp.display(),
+                                            err = %e,
+                                            "worktree manager failed; Phase 3 implementation tools disabled"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            None => {
+                                warn!("no repo_path and no cwd; Phase 3 implementation tools disabled");
+                                None
+                            }
+                        }
+                    }
+                },
             };
 
             // Fetch available TTS voices if endpoint configured

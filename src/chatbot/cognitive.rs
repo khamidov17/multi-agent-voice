@@ -27,25 +27,33 @@ use crate::chatbot::metrics::MetricsCollector;
 const MODES: &[(&str, &str)] = &[
     (
         "MONITOR",
-        "Phase 1+2 triage + planning pass. \
+        "Phase 1+2+3 triage + planning + implementation pass. \
       STEP 1 — Alerts: call `read_alerts` (no args). For each open alert: \
       - Critical/high + owner would want to know → `send_triage_report` with a concise \
         preamble and `auto_mark_triaged=true`. \
       - Benign (spurious gap, already-handled restart) → `mark_triaged` with a `note`. \
       - Not sure → leave for next tick. \
-      STEP 2 — Fix plans: call `list_fix_plans` with status=\"draft\" and status=\"sent\". \
-      - For every CRITICAL alert that does NOT have an open plan (draft or sent), draft one via \
-        `draft_fix_plan`. Reference the alert's evidence in root_cause. Be concrete about \
-        steps — list the actual files/functions, not 'investigate'. Pick low-risk wording if \
-        the change really is small (e.g. detector threshold tuning). \
-      - Once drafted, `send_fix_plan_to_owner` with a 1-2 sentence preamble explaining WHY \
-        you drafted it. Draft→sent transitions automatically on send. \
-      - Do NOT draft plans for medium/low alerts unless they're recurring (count > 5). \
-      - Do NOT draft a plan if there's already an 'approved' plan for that alert — Phase 3 \
-        will ship it; you're done with that alert. \
-      STEP 3 — Owner replies: you'll see messages like `approve #42` / `reject #42 because X`. \
-      The harness auto-transitions the plan status when these arrive; you don't need to handle \
-      them in the cognitive loop. \
+      STEP 2 — Draft plans for uncovered criticals: call `list_fix_plans` with status=\"draft\" \
+      and status=\"sent\". For every CRITICAL alert that does NOT have an open plan, draft one \
+      via `draft_fix_plan` then `send_fix_plan_to_owner` (1-2 sentence preamble). Do NOT draft \
+      for medium/low alerts unless count > 5. Do NOT draft if there's already an approved \
+      plan — Phase 3 handles those. \
+      STEP 3 — Implement approved plans. Call `list_fix_plans` with status=\"approved\". \
+      For each approved plan: \
+      (a) `start_implementation(plan_id)` — returns `worktree_path`. Save it mentally. \
+      (b) Read the plan (root_cause, steps) and for EACH concrete step, call `protected_write` \
+          with the path under the worktree, e.g. \
+          `protected_write(path=\"<worktree_path>/src/chatbot/detectors.rs\", content=..., \
+          reason=\"plan #N step 1\")`. Base your diff off the existing file — read it first with \
+          the Read tool (it points at the main clone — OK, the worktree is a fresh checkout so \
+          the file content is identical at the start). \
+      (c) When all file writes are done, `commit_and_push(plan_id, message)` with a Conventional \
+          Commits-style message referencing the alert id. \
+      (d) `open_pr(plan_id)` — harness formats the body from your plan markdown, creates the PR, \
+          transitions plan → implemented, reaps the worktree. Returns `pr_url`. \
+      (e) DM the owner one line: \"plan #N shipped — <pr_url>\". DO NOT auto-merge. \
+      STEP 4 — Owner replies: `approve #N` / `reject #N because X` are auto-handled by the \
+      harness — no action needed from you. \
       Also: check data/shared/bot_messages.db for unanswered handoffs. \
       If all clear, stop quickly.",
     ),
