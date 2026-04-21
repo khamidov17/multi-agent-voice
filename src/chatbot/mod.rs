@@ -18,6 +18,7 @@ pub mod fix_plans;
 pub mod format;
 pub mod gemini;
 pub mod git_ops;
+pub mod worktree;
 pub mod health;
 pub mod journal;
 pub mod message;
