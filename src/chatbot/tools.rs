@@ -698,6 +698,51 @@ pub enum ToolCall {
         auto_mark_triaged: bool,
     },
 
+    /// Phase 2 — draft a markdown fix plan for an alert. Nova MUST
+    /// have already read the alert via `read_alerts` before drafting;
+    /// the dispatch doesn't enforce this (nothing to check) but the
+    /// root_cause field should reference concrete evidence from the
+    /// alert row. Fails if a non-terminal plan (draft/sent) already
+    /// exists for the same alert_id — Nova must cancel or resolve
+    /// the existing plan first.
+    DraftFixPlan {
+        alert_id: i64,
+        title: String,
+        root_cause: String,
+        steps: String,
+        risk: String,
+        test_plan: String,
+    },
+
+    /// Phase 2 — list currently drafted fix plans. Optional status
+    /// filter (draft / sent / approved / rejected / obsolete /
+    /// implemented). Defaults to "all statuses". Used by Nova's
+    /// cognitive loop to check whether an alert already has a plan.
+    ListFixPlans {
+        status: Option<String>,
+        limit: Option<i64>,
+    },
+
+    /// Phase 2 — move a plan to a new status. Transitions are strict:
+    /// see `fix_plans::is_valid_transition`. Nova uses `obsolete` to
+    /// cancel her own drafts; owner (via Nova relay) uses `approved`
+    /// / `rejected` after reviewing a sent plan. `implemented` is
+    /// reserved for Phase 3.
+    UpdateFixPlanStatus {
+        plan_id: i64,
+        new_status: String,
+        note: Option<String>,
+    },
+
+    /// Phase 2 — send a fix plan to the owner's DM for approval and
+    /// transition the plan to `sent`. Harness formats the markdown;
+    /// Nova provides only a preamble. Refuses non-owner chat_id.
+    SendFixPlanToOwner {
+        plan_id: i64,
+        chat_id: i64,
+        preamble: String,
+    },
+
     /// Parse error - tool call couldn't be parsed. Error message will be sent back to model.
     #[serde(skip)]
     ParseError { message: String },
@@ -1723,6 +1768,83 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "draft_fix_plan".to_string(),
+            description: "Phase 2 — draft a markdown fix plan linked to a specific `alert_id`. Before calling this, read the alert via `read_alerts` so `root_cause` references concrete evidence. Each plan has: title (one line), root_cause (one paragraph — what you believe caused this), steps (markdown bullet list of concrete changes you would make), risk (what could break), test_plan (how to verify). The harness refuses if a non-terminal plan (draft/sent) already exists for this alert_id — cancel or resolve the existing plan with `update_fix_plan_status` first. Plans are drafts only — Phase 2 does NOT write code. Phase 3 is where approved plans become PRs.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "alert_id": {
+                        "type": "integer",
+                        "description": "ID of the bug alert this plan addresses. Obtain from `read_alerts`."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "One-line plan title. Shown in list_fix_plans and in the owner's triage DM."
+                    },
+                    "root_cause": {
+                        "type": "string",
+                        "description": "One paragraph: what you believe caused this bug. Reference evidence from the alert's evidence field."
+                    },
+                    "steps": {
+                        "type": "string",
+                        "description": "Markdown bullet list of concrete changes. One bullet per change. No vague 'investigate further' steps."
+                    },
+                    "risk": {
+                        "type": "string",
+                        "description": "What could break. Be honest. 'low risk — log change only' is fine if true."
+                    },
+                    "test_plan": {
+                        "type": "string",
+                        "description": "How the owner (or Phase 3 CI) would verify this fix works. Name specific tests or manual checks."
+                    }
+                },
+                "required": ["alert_id", "title", "root_cause", "steps", "risk", "test_plan"]
+            }),
+        },
+        Tool {
+            name: "list_fix_plans".to_string(),
+            description: "Phase 2 — list fix plans in the shared store, optionally filtered by status. Returns newest first. Use this in your cognitive-loop triage pass to check whether an alert already has an open plan before drafting a new one.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "One of: draft, sent, approved, rejected, obsolete, implemented. Omit for all statuses."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows. Defaults 50, cap 500."
+                    }
+                }
+            }),
+        },
+        Tool {
+            name: "update_fix_plan_status".to_string(),
+            description: "Phase 2 — transition a fix plan to a new status. Valid transitions: draft→sent (normally via send_fix_plan_to_owner, not this tool directly); draft→obsolete (Nova cancels own draft); sent→approved (after owner reviews); sent→rejected; sent→obsolete; approved→implemented (Phase 3); approved→obsolete. Other transitions are refused — e.g. can't walk back an approval, can't jump draft→approved without human review. Always include a `note` explaining the reason for the transition.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {"type": "integer", "description": "Plan ID from list_fix_plans."},
+                    "new_status": {"type": "string", "description": "Target status. See valid transitions above."},
+                    "note": {"type": "string", "description": "Free-form reason; stored on the row for post-mortem."}
+                },
+                "required": ["plan_id", "new_status"]
+            }),
+        },
+        Tool {
+            name: "send_fix_plan_to_owner".to_string(),
+            description: "Phase 2 — format the plan as Telegram markdown and DM it to the owner for approval. The plan automatically transitions draft→sent on successful send. The owner replies with 'approve #N' / 'reject #N because ...' (parsed by the harness on the next DM from the owner). Refuses non-owner chat_id. Provide a short `preamble` describing WHY you drafted this plan — e.g. 'heartbeat watchdog fired 19 times in 2 hours, proposing fix for sleep-cycle gap'.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plan_id": {"type": "integer"},
+                    "chat_id": {"type": "integer", "description": "Owner's DM chat_id. Dispatch refuses non-owner targets."},
+                    "preamble": {"type": "string", "description": "Your lead-in above the plan body."}
+                },
+                "required": ["plan_id", "chat_id", "preamble"]
+            }),
+        },
+        Tool {
             name: "send_triage_report".to_string(),
             description: "Phase 1 — send a consolidated Telegram DM to the owner summarizing the currently open bug alerts. The harness formats the alert list as markdown (severity badges, counts, last_seen times, short evidence preview) and appends it to your `preamble`. When `auto_mark_triaged` is true, all alerts included in the report are closed atomically after the send succeeds — don't forget to read them first with `read_alerts`. Use this for end-of-triage summaries or on-demand status replies to the owner.".to_string(),
             parameters: serde_json::json!({
@@ -1807,17 +1929,27 @@ mod tests {
         // Exact count — update this when adding/removing tools.
         // Phase 0 added one tool: protected_write. Was 70 pre-Phase-0.
         // Phase 1 added three: read_alerts, mark_triaged, send_triage_report.
+        // Phase 2 added four: draft_fix_plan, list_fix_plans,
+        //                     update_fix_plan_status, send_fix_plan_to_owner.
         assert_eq!(
             tools.len(),
-            74,
+            78,
             "Tool count changed — update this test. Tools: {:?}",
             names
         );
-        // Phase 1 triage tools must be present and discoverable by Nova.
-        for expected in ["read_alerts", "mark_triaged", "send_triage_report"] {
+        // Phase 1 + Phase 2 tools must be present and discoverable by Nova.
+        for expected in [
+            "read_alerts",
+            "mark_triaged",
+            "send_triage_report",
+            "draft_fix_plan",
+            "list_fix_plans",
+            "update_fix_plan_status",
+            "send_fix_plan_to_owner",
+        ] {
             assert!(
                 names.contains(&expected),
-                "Phase 1 tool `{}` missing from get_tool_definitions",
+                "tool `{}` missing from get_tool_definitions",
                 expected
             );
         }
