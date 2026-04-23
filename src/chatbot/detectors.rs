@@ -30,10 +30,17 @@ use tracing::{debug, info, warn};
 use super::alerts::{AlertsWriter, BugAlert, MaybeEmit, Severity};
 
 /// Default threshold above which a heartbeat gap is surfaced as an alert.
-/// Matches the design doc's "heartbeat gap > 30s" failure definition
-/// (line 163). Tune with [`spawn_heartbeat_watchdog`]'s `gap_threshold_secs`
-/// argument if a particular deployment needs tighter/looser bounds.
-pub const DEFAULT_HEARTBEAT_GAP_THRESHOLD_SECS: u64 = 30;
+///
+/// **Raised from the design doc's original 30s to 300s on 2026-04-22** after
+/// a 1.5-hour production run where Nova was idle between cognitive ticks
+/// (normal behavior) and the watchdog fired ~1700 times per day, flooding
+/// her triage pass with its own noise. A heartbeat gap is only a real
+/// signal when it's LONGER than the cognitive interval — 300s matches
+/// `start_cognitive_loop`'s default tick, so a missed tick is 1+ fresh
+/// alerts. Tune with [`spawn_heartbeat_watchdog`]'s `gap_threshold_secs`
+/// argument if a particular deployment needs tighter/looser bounds (e.g.
+/// Tier-2 bots with cognitive_interval_secs=600 should raise this to match).
+pub const DEFAULT_HEARTBEAT_GAP_THRESHOLD_SECS: u64 = 300;
 
 /// Default poll interval for the heartbeat watchdog. 5s gives the
 /// watchdog ~6 chances to notice a 30s gap before it doubles, which is

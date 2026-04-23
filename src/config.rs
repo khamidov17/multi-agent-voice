@@ -83,8 +83,20 @@ struct ConfigFile {
     dashboard_username: Option<String>,
     /// Dashboard password (required to access /dashboard).
     dashboard_password: Option<String>,
-    /// Enable dual-lane processing (deep work + quick response). Default: true.
-    #[serde(default = "default_true_config")]
+    /// Enable dual-lane processing (deep work + quick response).
+    ///
+    /// **Default: false.** The original Mirzo architecture had ONE Claude
+    /// subprocess per bot — responsiveness came from the debouncer (burst
+    /// messages batched into one turn) + mid-turn injection (new DMs written
+    /// directly to the running Claude's stdin). Enabling a second fast-model
+    /// lane on top creates a memory-split problem: the quick lane doesn't
+    /// see the deep lane's conversation. On 2026-04-23, Nova's dual-lane
+    /// deploy produced visibly split-brained replies ("which #3 are you
+    /// approving? I'm in the quick lane and don't have the list in front
+    /// of me"). Keeping this off by default restores the Mirzo-correct
+    /// single-mind model. Individual deployments can opt in but should
+    /// understand the context-split tradeoff.
+    #[serde(default)]
     dual_lane_enabled: bool,
     /// Deep-lane Claude model to pass to `claude --model`. Values Claude Code
     /// understands: `opus`, `sonnet`, `haiku`, or a full model id. Defaults
