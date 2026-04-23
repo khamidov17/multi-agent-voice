@@ -1448,26 +1448,37 @@ fn spawn_process_with_guardian(
     // Prevents runaway processes from consuming all system resources.
     //
     // Limits MUST be generous enough that Claude Code can bootstrap cleanly.
-    // A too-tight RLIMIT_NOFILE (previously 1024) broke macOS keychain auth
-    // on the subprocess — keychain access opens a lot of fds for XPC
-    // connections, MCP servers, config files, etc. When that ran out, auth
-    // silently fell through to "Not logged in · Please run /login", which
-    // Claude Code's schema enforcer then tried to wrap in a StructuredOutput
-    // call, spinning a synthetic-response loop at ~1000/sec. Nova was
-    // completely bricked on 2026-04-21 by this.
     //
-    // Raised to match typical macOS defaults: NOFILE 10240, NPROC 2048.
-    // Memory cap stays at 4 GB — runaway claude subprocesses were the
-    // original motivation.
+    // Two separate Linux/macOS fixes live here:
+    //
+    // - **RLIMIT_NOFILE = 10240 (up from 1024).** macOS keychain auth opens
+    //   a lot of fds for XPC / MCP servers / config files. When NOFILE
+    //   bottomed out at 1024, auth silently fell through to
+    //   "Not logged in · Please run /login", which Claude Code's
+    //   json-schema enforcer wrapped in a StructuredOutput-retry loop
+    //   at ~1000/sec. Nova was completely bricked on 2026-04-21 by this.
+    //
+    // - **RLIMIT_AS intentionally NOT set.** Earlier this file capped AS
+    //   at 4 GB on the theory it would catch runaway claude subprocesses.
+    //   That works on macOS (which doesn't count mmap'd files and unused
+    //   thread-stack VM toward AS). On Linux, Node.js grabs 5-8 GB of
+    //   virtual address space at startup (thread stacks of 8 MB each,
+    //   JIT code heap, mmap'd .so files), and the 4 GB cap makes the
+    //   HTTPS agent silently fail to initialize — every API call returns
+    //   "Unable to connect to API". Diagnosed on 2026-04-22 with
+    //   `prlimit --as=4294967296 claude --print "ping"` timing out,
+    //   same command without the cap returning instantly. Runaway-memory
+    //   protection now lives in the synthetic-loop circuit breaker
+    //   (5-strikes-and-reset) + the health monitor's RSS check, not here.
+    //
+    // - **RLIMIT_NPROC = 2048.** Prevents fork bombs from any misbehaving
+    //   subprocess tooling Claude might invoke. 2048 is plenty for Node
+    //   + worker threads + spawn_blocking pools.
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
-            use libc::{RLIMIT_AS, RLIMIT_NOFILE, RLIMIT_NPROC, rlimit, setrlimit};
-            let mem = rlimit {
-                rlim_cur: 4_294_967_296,
-                rlim_max: 4_294_967_296,
-            }; // 4GB
+            use libc::{RLIMIT_NOFILE, RLIMIT_NPROC, rlimit, setrlimit};
             let files = rlimit {
                 rlim_cur: 10_240,
                 rlim_max: 10_240,
@@ -1476,7 +1487,6 @@ fn spawn_process_with_guardian(
                 rlim_cur: 2048,
                 rlim_max: 2048,
             };
-            let _ = setrlimit(RLIMIT_AS, &mem);
             let _ = setrlimit(RLIMIT_NOFILE, &files);
             let _ = setrlimit(RLIMIT_NPROC, &procs);
             Ok(())
