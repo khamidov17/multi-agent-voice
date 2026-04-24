@@ -1091,10 +1091,26 @@ fn setup_claude_process(
                         allowed_set.push(Box::leak(t.to_string().into_boxed_str()));
                     }
                 }
+                // **First-party MCP servers auto-registered by the claude.ai
+                // Max subscription** (Gmail / Google Drive / Google Calendar).
+                // Claude Code 2.1.110+ advertises these in the init `tools`
+                // array regardless of `--tools` passed on the CLI — the
+                // subscription owns the MCP server registration, not us.
+                // They are safe: authenticated against the user's own
+                // Google account, cannot escalate beyond scopes the user
+                // granted. The strict SECURITY check below stays in place
+                // for any OTHER prefix (e.g. a maliciously-registered
+                // third-party MCP), but `mcp__claude_ai_*` is whitelisted
+                // unconditionally.
+                //
+                // Added 2026-04-23 after Atlas AND Nova both worker-died at
+                // startup on the DigitalOcean deploy, blocking all replies
+                // with "Security violation."
                 let unexpected: Vec<_> = sys
                     .tools
                     .iter()
                     .filter(|t| !allowed_set.contains(&t.as_str()))
+                    .filter(|t| !t.starts_with("mcp__claude_ai_"))
                     .collect();
                 if !unexpected.is_empty() {
                     error!("SECURITY: Unexpected tools: {:?}", unexpected);
