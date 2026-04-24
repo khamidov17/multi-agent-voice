@@ -1,0 +1,25 @@
+[package]
+name = "classify-pr"
+version = "0.1.0"
+edition = "2024"
+description = "Phase 4 mechanical auto-merge classifier. Given a PR diff, emits a JSON verdict: eligible for auto-merge (fmt-equivalent) or not, with a reason code the operator can act on. Trust boundary: deterministic only. No LLM anywhere in this crate."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "classify-pr"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+# Minimal deps per ENG-A1 — keep warm-build under 15s on GitHub runners.
+# No teloxide, no reqwest, no rusqlite. This crate never talks to the trio crate.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

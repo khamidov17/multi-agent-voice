@@ -16,6 +16,9 @@ supervisor/target/
 # Bootstrap guardian (Phase 0) build artifacts
 bootstrap-guardian/target/
 
+# Phase 4 classifier build artifacts
+tools/classify-pr/target/
+
 # Bootstrap guardian runtime state (key, nonces, sockets, logs)
 # Paths match ~/claudir-dev/run and /opt/claudir/run defaults in deploy/guardian.example.json
 claudir-dev/run/
