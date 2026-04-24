@@ -1,0 +1,127 @@
+name: automerge / shadow-mode reconcile
+
+# Shadow-mode validation: compare what the classifier WOULD have decided
+# against what the human actually did. Runs when a PR closes (merged or
+# not). Appends one row to shadow-decisions.jsonl per PR.
+#
+# Gate for un-pausing (leaving shadow mode): ≥10 matched human decisions
+# with zero false positives (classifier said eligible + human rejected).
+# See design doc Success Criteria.
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+  actions: read
+
+concurrency:
+  # Serialize appends to shadow-decisions.jsonl — a rebase war is cheaper
+  # than a corrupted log.
+  group: shadow-mode-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # We push back to main, so use the default GITHUB_TOKEN and
+          # rely on the branch-protection rule allowing this specific
+          # workflow to push. If the repo's protection blocks pushes,
+          # swap to a PAT in AUTOMERGE_CTL_TOKEN.
+          token: ${{ secrets.AUTOMERGE_CTL_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Download classifier verdict artifact
+        id: verdict
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_NAME="classify-verdict-pr-${PR_NUMBER}"
+          # Fetch the most recent classify run for this PR by listing
+          # artifacts across the classify workflow's runs.
+          RUN_ID=$(gh api \
+            "/repos/${{ github.repository }}/actions/workflows/automerge-classify.yml/runs?event=pull_request_target&per_page=30" \
+            --jq ".workflow_runs | map(select(.pull_requests[0].number == $PR_NUMBER)) | .[0].id" || echo "")
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "No classify run found for PR #${PR_NUMBER} — skipping reconcile."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh run download "$RUN_ID" -n "$ARTIFACT_NAME" -D /tmp/verdict 2>/dev/null || {
+            echo "Artifact $ARTIFACT_NAME not found on run $RUN_ID — skipping."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "--- verdict ---"
+          cat /tmp/verdict/verdict.json
+
+      - name: Append reconciled row
+        if: steps.verdict.outputs.found == 'true'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_MERGED_BY: ${{ github.event.pull_request.merged_by.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          VERDICT_ELIGIBLE=$(jq -r '.eligible' /tmp/verdict/verdict.json)
+          VERDICT_REASON=$(jq -r '.reason_code' /tmp/verdict/verdict.json)
+
+          # Match analysis — the 4-cell taxonomy from design doc DX-E2:
+          #   classifier=eligible + merged = WIN (auto-merge would have helped)
+          #   classifier=eligible + not-merged = FALSE_POSITIVE (UNSAFE)
+          #   classifier=ineligible + merged = correct rejection, human reviewed
+          #   classifier=ineligible + not-merged = TRUE_NEGATIVE (out of scope)
+          if [ "$VERDICT_ELIGIBLE" = "true" ] && [ "$PR_MERGED" = "true" ]; then
+            MATCH="win"
+          elif [ "$VERDICT_ELIGIBLE" = "true" ] && [ "$PR_MERGED" != "true" ]; then
+            MATCH="false_positive"
+          elif [ "$VERDICT_ELIGIBLE" = "false" ] && [ "$PR_MERGED" = "true" ]; then
+            MATCH="correct_reject"
+          else
+            MATCH="true_negative"
+          fi
+
+          ROW=$(jq -n \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg pr "$PR_NUMBER" \
+            --arg title "$PR_TITLE" \
+            --arg merged "$PR_MERGED" \
+            --arg merged_by "$PR_MERGED_BY" \
+            --arg eligible "$VERDICT_ELIGIBLE" \
+            --arg reason "$VERDICT_REASON" \
+            --arg match "$MATCH" \
+            '{ts:$ts, pr:$pr, title:$title, merged:$merged, merged_by:$merged_by, classifier_eligible:$eligible, classifier_reason:$reason, match:$match}')
+
+          mkdir -p tools/classify-pr/state
+          echo "$ROW" >> tools/classify-pr/state/shadow-decisions.jsonl
+
+          git config user.name  "trio-automerge-bot"
+          git config user.email "trio-automerge-bot@users.noreply.github.com"
+          git add tools/classify-pr/state/shadow-decisions.jsonl
+          git commit -m "chore(phase-4): shadow-mode reconcile for PR #${PR_NUMBER} (match=$MATCH)"
+          # Best-effort push; if rebase is needed, retry once.
+          git push origin main || { git pull --rebase origin main && git push origin main; }
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "## Shadow-mode reconcile"
+            echo "- PR: #${{ github.event.pull_request.number }}"
+            echo "- Merged: ${{ github.event.pull_request.merged }}"
+            echo "- Verdict artifact found: ${{ steps.verdict.outputs.found }}"
+          } >> "$GITHUB_STEP_SUMMARY"

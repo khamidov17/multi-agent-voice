@@ -1,0 +1,120 @@
+name: automerge / required-checks audit
+
+# Weekly audit of branch protection on `main`. Diffs the live required-
+# check list against the allowlist in docs/phase4-setup.md. If they drift
+# (renamed check silently lowered the bar, new required check missing
+# from docs, etc.), opens a phase4-alert issue.
+#
+# Addresses ENG-F2 finding.
+
+on:
+  schedule:
+    # Monday 08:00 UTC. Cheap, low-stakes; weekly cadence matches the
+    # owner's retro loop.
+    - cron: '0 8 * * 1'
+  workflow_dispatch: # manual trigger for testing the audit itself
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch branch protection required checks
+        id: live
+        env:
+          GH_TOKEN: ${{ secrets.AUTOMERGE_CTL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Branch protection API requires admin scope. If the default
+          # token can't read it, swap to AUTOMERGE_CTL_TOKEN. If neither
+          # works, we log the failure as an audit alert of its own.
+          if ! gh api "/repos/${{ github.repository }}/branches/main/protection" > /tmp/protection.json 2>/dev/null; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "failed=false" >> "$GITHUB_OUTPUT"
+          jq -r '.required_status_checks.contexts[]?' /tmp/protection.json | sort -u > /tmp/live-checks.txt
+          echo "--- live required checks ---"
+          cat /tmp/live-checks.txt
+
+      - name: Extract expected checks from docs/phase4-setup.md
+        id: expected
+        run: |
+          set -euo pipefail
+          if [ ! -f docs/phase4-setup.md ]; then
+            echo "docs/phase4-setup.md not found — cannot audit." >&2
+            echo "missing_doc=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "missing_doc=false" >> "$GITHUB_OUTPUT"
+          # Parse the fenced block labelled ```required-checks-allowlist in
+          # the setup doc. One check name per line.
+          awk '
+            /^```required-checks-allowlist/ { capture=1; next }
+            /^```/ && capture      { capture=0 }
+            capture                 { print }
+          ' docs/phase4-setup.md | sed 's/[[:space:]]//g' | grep -v '^$' | sort -u > /tmp/expected-checks.txt
+          echo "--- expected required checks ---"
+          cat /tmp/expected-checks.txt
+
+      - name: Compare and open alert on drift
+        if: steps.live.outputs.failed == 'false' && steps.expected.outputs.missing_doc == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DIFF=$(diff -u /tmp/expected-checks.txt /tmp/live-checks.txt || true)
+          if [ -z "$DIFF" ]; then
+            echo "Required-check allowlist matches live branch protection."
+            exit 0
+          fi
+
+          TITLE="phase4-alert: branch-protection required-checks drift detected"
+          {
+            printf '%s\n' "**Weekly audit: live required-checks on \`main\` drift from docs/phase4-setup.md.**"
+            printf '\n'
+            printf '%s\n' "## Diff"
+            printf '%s\n' '```diff'
+            printf '%s\n' "$DIFF"
+            printf '%s\n' '```'
+            printf '\n'
+            printf '%s\n' "## What to do"
+            printf '\n'
+            printf '%s\n' "Either:"
+            printf '\n'
+            printf '%s\n' "1. The doc is stale — update \`docs/phase4-setup.md\` to match the current live config, OR"
+            printf '%s\n' "2. The live config is wrong — restore it via the GitHub UI or \`gh api\` to match the doc."
+            printf '\n'
+            printf '%s\n' "If a required check was **renamed**, the live config will show the new name and the"
+            printf '%s\n' "old name silently disappeared from enforcement — any PR that was previously blocked"
+            printf '%s\n' "on the old name will now pass the required check. Verify nothing unsafe slipped through."
+            printf '\n'
+            printf '%s\n' "Opened automatically by \`.github/workflows/required-checks-audit.yml\`."
+          } > /tmp/phase4-audit-body.md
+          gh issue create \
+            --title "$TITLE" \
+            --body-file /tmp/phase4-audit-body.md \
+            --label "phase4-alert"
+
+      - name: Alert on audit-tool failure
+        if: steps.live.outputs.failed == 'true' || steps.expected.outputs.missing_doc == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.live.outputs.failed }}" = "true" ]; then
+            REASON="Audit workflow could not read branch protection via the GitHub API. The token likely lacks admin:repo scope. Fix: grant \`AUTOMERGE_CTL_TOKEN\` admin scope, or run the audit manually with \`gh api /repos/.../branches/main/protection\`."
+          else
+            REASON="\`docs/phase4-setup.md\` is missing from the repo — the audit can't determine the expected allowlist. Fix: restore the setup doc."
+          fi
+          TITLE="phase4-alert: required-checks audit failed to run"
+          gh issue create \
+            --title "$TITLE" \
+            --body "$REASON" \
+            --label "phase4-alert"

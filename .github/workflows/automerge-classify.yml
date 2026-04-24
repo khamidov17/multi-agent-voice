@@ -1,0 +1,170 @@
+name: automerge / classify
+
+# Trust boundary: this workflow runs classifier code built from `main`, NOT
+# the PR branch. Using `pull_request_target` gives us base-branch context
+# with write permissions. We MUST NOT check out or execute the PR's
+# `tools/classify-pr/` tree — that tree is attacker-controllable in any PR.
+# See ENG-D1 in ~/.gstack/projects/.../ava-phase-0-design-20260424-213709.md.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  # Least privilege for the default GITHUB_TOKEN. Repo-variable writes
+  # (AUTOMERGE_ENABLED pause in canary) require a GitHub App with
+  # actions:write — that token is injected via the AUTOMERGE_CTL_KEY
+  # secret in the canary workflow, not here.
+  contents: read
+  pull-requests: write
+  statuses: write
+  checks: write
+
+concurrency:
+  # One classify run per PR at a time. If a new push arrives, cancel the
+  # in-flight run — the newer commit supersedes it. This prevents stale
+  # verdicts from landing after a force-push.
+  group: automerge-classify-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    # Skip draft PRs and PRs from forks (fork PRs can't land via auto-merge
+    # in this repo by policy — owner reviews them manually).
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      # Checkout `main`'s tools/classify-pr/ — NEVER the PR branch.
+      # This is the ENG-D1 security fix: the classifier binary must be the
+      # one from main, not a version the PR could have rewritten.
+      - name: Checkout base branch (trusted classifier source)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          sparse-checkout: |
+            tools/classify-pr
+            rust-toolchain.toml
+          sparse-checkout-cone-mode: false
+
+      - name: Install rust toolchain from pin
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          toolchain: stable
+
+      - name: Cache classifier build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/classify-pr
+          key: classify-pr-v1
+
+      - name: Build classifier (from main, release mode)
+        working-directory: tools/classify-pr
+        run: cargo build --release --locked
+
+      # Fetch the PR's list of changed paths via the GitHub API — we never
+      # execute PR code to derive this. The list comes from the same source
+      # of truth (GitHub's merged-diff view) the reviewer would see.
+      - name: Read PR changed paths via API
+        id: paths
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files?per_page=300" \
+            --paginate \
+            --jq '.[].filename' > /tmp/changed-paths.txt
+          echo "--- changed paths ---"
+          cat /tmp/changed-paths.txt
+          echo "---"
+          wc -l < /tmp/changed-paths.txt
+
+      # Now check out the PR's tree for `cargo fmt --check` to run against.
+      # The classifier binary (already built above from main) is what we
+      # trust; the PR's content is what we're judging. No PR code is
+      # EXECUTED here — rustfmt just reads+parses Rust files.
+      - name: Checkout PR tree into workspace for fmt check
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr-workspace
+          # Don't pull LFS, submodules, or anything beyond the sparse set —
+          # minimize the surface where malicious content could hide.
+
+      - name: Run classifier
+        id: classify
+        env:
+          # Fail-safe default: if the repo variable is unset, we pass
+          # empty string, which the classifier treats as PAUSED.
+          AUTOMERGE_ENABLED: ${{ vars.AUTOMERGE_ENABLED }}
+        run: |
+          set +e
+          ./tools/classify-pr/target/release/classify-pr check \
+            --repo-root "${{ github.workspace }}/pr-workspace" \
+            --changed-paths-file /tmp/changed-paths.txt \
+            --head-sha "${{ github.event.pull_request.head.sha }}" \
+            --base-sha "${{ github.event.pull_request.base.sha }}" \
+            --automerge-enabled "${AUTOMERGE_ENABLED}" \
+            --verdict-out /tmp/verdict.json
+          CODE=$?
+          set -e
+          echo "classifier exit code: $CODE"
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "--- verdict ---"
+          cat /tmp/verdict.json
+          echo "---"
+          # Render the verdict into the workflow summary for human debugging.
+          {
+            echo "## Classifier verdict"
+            echo
+            echo '```json'
+            cat /tmp/verdict.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verdict artifact (reconciler consumes this)
+        uses: actions/upload-artifact@v4
+        with:
+          name: classify-verdict-pr-${{ github.event.pull_request.number }}
+          path: /tmp/verdict.json
+          retention-days: 90
+
+      - name: Apply label + required status check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXIT_CODE: ${{ steps.classify.outputs.exit_code }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Pull verdict fields for the status check description.
+          REASON_CODE=$(jq -r '.reason_code' /tmp/verdict.json)
+          HUMAN_MSG=$(jq -r '.human_message' /tmp/verdict.json)
+          # GitHub status check descriptions cap at 140 chars.
+          DESC=$(echo "$HUMAN_MSG" | head -c 140)
+
+          if [ "$EXIT_CODE" = "0" ]; then
+            STATE=success
+            gh pr edit "$PR_NUMBER" --add-label "automerge:mechanical" || true
+          else
+            STATE=failure
+            # Remove the label if it was set by a previous run (race where
+            # a force-push made an eligible PR ineligible).
+            gh pr edit "$PR_NUMBER" --remove-label "automerge:mechanical" || true
+          fi
+
+          # The SOLE enforcement primitive for branch protection is this
+          # status check, not the label. The label is advisory.
+          # ENG-4 from review: "branch protection doesn't enforce label
+          # presence, only status checks."
+          gh api \
+            --method POST \
+            "/repos/${{ github.repository }}/statuses/${HEAD_SHA}" \
+            -f state="$STATE" \
+            -f context="automerge/classified-safe" \
+            -f description="$DESC" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
