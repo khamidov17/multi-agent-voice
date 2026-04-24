@@ -1,4 +1,18 @@
 
+## Phase 4 — deferred to 4.1 (added by /autoplan on 2026-04-24)
+
+All non-critical items from the Phase 4 autoplan consensus that can wait
+until Phase 4.0 proves the loop and the 30-day kill criterion evaluates.
+
+- [ ] Dead-code classifier mode (`cargo rustc -- -W dead_code` → only-removes-flagged-lines diff check). Added to `tools/classify-pr/src/` as a new module; wire into `classify::classify` behind a mode flag.
+- [ ] Toolchain SHA embedding via `tools/classify-pr/build.rs` — embed a SHA-256 of `rust-toolchain.toml` at classifier build time. Fail closed on drift. Covers the ENG-B5 non-determinism finding at the code level (rust-toolchain.toml is already in protected paths).
+- [ ] Clippy lint pin file `tools/classify-pr/clippy-autofix.toml` with embedded SHA. Matches the toolchain approach.
+- [ ] `docs/phase4-verdict-schema.md` — JSON schema reference for the verdict struct. Currently in `tools/classify-pr/src/verdict.rs` doc comments; promote to ops doc.
+- [ ] `docs/phase4-upgrade.md` — explicit Toolchain Bump Procedure + clippy pin bump procedure. Currently inline in setup.md; extract for long-form runbook.
+- [ ] Per-PR override label wiring. Runbook documents the intent; classifier workflow needs to honor `automerge:override` when `github.actor == <owner>` and short-circuit the fmt-equiv verdict (still requires other CI green).
+- [ ] Historical corpus hand-labeling (the Assignment in `tools/classify-pr/fixtures/README.md`). Owner task, not AI.
+- [ ] Live server-side setup walkthrough on the deploy box: GitHub App creation, `AUTOMERGE_ENABLED=0` init, branch protection with `enforce_admins=true`. Owner task.
+
 ## Phase 0 — deferred items (added by /autoplan on 2026-04-21)
 
 - [ ] Define Sentinel-watches-Nova event schema (Phase 2 pre-work)

@@ -1,5 +1,10 @@
 /target
 /logs
+
+# Local operational artifacts (snapshots, archived projects) — never commit
+archive/
+deploy/
+*.tar.gz
 claudir.json
 claudir-test.json
 .DS_Store

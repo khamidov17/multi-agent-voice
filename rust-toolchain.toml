@@ -1,4 +1,7 @@
 [toolchain]
-channel = "1.85"
+# Trio uses let-chains (stabilized in 1.88) throughout the chatbot modules,
+# so the pin must be >= 1.88. Using 1.90 (2025-09-14) — a recent stable with
+# broad `edition = "2024"` support.
+channel = "1.90"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
