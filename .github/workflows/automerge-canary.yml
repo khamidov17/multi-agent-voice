@@ -1,0 +1,134 @@
+name: automerge / canary
+
+# Post-merge watchdog. If any required CI job on main fails within 30 min
+# of an auto-merged commit, AND the failing commit was authored by the
+# auto-merge squash bot, flip AUTOMERGE_ENABLED=0 and open an alert issue.
+#
+# Why author-attribution (not time-window-alone): ENG-12 from review. A
+# time window catches concurrent human merges too, which causes false-
+# positive pauses.
+
+on:
+  # Run when any workflow targeting `main` finishes.
+  workflow_run:
+    workflows: ['*']
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    if: |
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_branch == 'main'
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+
+      - name: Identify the failing commit's author window
+        id: attribution
+        env:
+          FAILED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          # The commit whose CI just failed.
+          FAILED_AUTHOR=$(git log -1 --format='%ae' "$FAILED_SHA")
+          FAILED_TIME=$(git log -1 --format='%at' "$FAILED_SHA")
+          NOW=$(date +%s)
+          AGE=$(( NOW - FAILED_TIME ))
+
+          echo "failed_sha=$FAILED_SHA"     >> "$GITHUB_OUTPUT"
+          echo "failed_author=$FAILED_AUTHOR" >> "$GITHUB_OUTPUT"
+          echo "age_seconds=$AGE"            >> "$GITHUB_OUTPUT"
+
+          # Canary only pauses for auto-merged commits. Detect by author
+          # pattern: the dedicated auto-merge account's email is defined
+          # in docs/phase4-setup.md. We conservatively match common bot
+          # author patterns.
+          is_automerge="false"
+          case "$FAILED_AUTHOR" in
+            *"[bot]"* | *"github-actions"* | *"noreply@github.com"*)
+              is_automerge="true" ;;
+          esac
+          # Also check if the commit message starts with what `gh pr
+          # merge --squash` produces on auto-merge: "Merge pull request
+          # #N from ..." or the squashed-PR title prefix.
+          FAILED_MSG=$(git log -1 --format='%s' "$FAILED_SHA")
+          case "$FAILED_MSG" in
+            "Merge pull request "*|*"(#"*")"*)
+              is_automerge="true" ;;
+          esac
+          echo "is_automerge=$is_automerge" >> "$GITHUB_OUTPUT"
+
+          # Attribution window: only pause if the failure is recent enough
+          # that the auto-merge commit is likely the cause. 30 min default,
+          # from design doc's success criteria.
+          if [ "$AGE" -gt 1800 ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pause auto-merge if attributable
+        if: steps.attribution.outputs.is_automerge == 'true' && steps.attribution.outputs.stale == 'false'
+        env:
+          # PAT or GitHub App token with actions:write scope. Default
+          # GITHUB_TOKEN cannot write repo variables (ENG-D4 finding).
+          GH_TOKEN: ${{ secrets.AUTOMERGE_CTL_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Pausing AUTOMERGE_ENABLED (was ${{ vars.AUTOMERGE_ENABLED }})"
+          gh api \
+            --method PATCH \
+            "/repos/${{ github.repository }}/actions/variables/AUTOMERGE_ENABLED" \
+            -f name="AUTOMERGE_ENABLED" \
+            -f value="0" \
+          || gh api \
+            --method POST \
+            "/repos/${{ github.repository }}/actions/variables" \
+            -f name="AUTOMERGE_ENABLED" \
+            -f value="0"
+
+      - name: Open phase4-alert issue
+        if: steps.attribution.outputs.is_automerge == 'true' && steps.attribution.outputs.stale == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FAILED_SHA: ${{ steps.attribution.outputs.failed_sha }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          TITLE="phase4-alert: canary paused auto-merge after ${WORKFLOW_NAME} failure on ${FAILED_SHA:0:7}"
+          # Assemble body with printf so the YAML block scalar stays intact
+          # (a flush-left heredoc body terminates the block scalar).
+          {
+            printf '%s\n' "**Canary triggered — auto-merge is now paused.**"
+            printf '\n'
+            printf '%s\n' "- Failing workflow: [${WORKFLOW_NAME}](${RUN_URL})"
+            printf '%s\n' "- Failing commit: \`${FAILED_SHA}\`"
+            printf '%s\n' "- Repo variable: \`AUTOMERGE_ENABLED\` set to \`0\`"
+            printf '\n'
+            printf '%s\n' "## Runbook"
+            printf '\n'
+            printf '%s\n' "Follow \`docs/phase4-runbook.md\` pause-recovery checklist:"
+            printf '\n'
+            printf '%s\n' "- [ ] Confirm regression bisects to the auto-merged commit (not a concurrent human commit)"
+            printf '%s\n' "- [ ] Revert the auto-merged commit OR land a forward-fix"
+            printf '%s\n' "- [ ] Verify \`main\` CI is green"
+            printf '%s\n' "- [ ] Set \`AUTOMERGE_ENABLED=1\` via \`gh variable set AUTOMERGE_ENABLED --body 1\`"
+            printf '%s\n' "- [ ] Verify next Nova PR gets \`automerge/classified-safe=success\` within 5 min"
+            printf '%s\n' "- [ ] Close this issue with a one-line post-mortem"
+            printf '\n'
+            printf '%s\n' "Opened automatically by \`.github/workflows/automerge-canary.yml\`."
+          } > /tmp/phase4-body.md
+          gh issue create \
+            --title "$TITLE" \
+            --body-file /tmp/phase4-body.md \
+            --label "phase4-alert"
