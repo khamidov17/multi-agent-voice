@@ -47,14 +47,23 @@ What is still deferred (tracked in TODOS.md):
 
 **Full architecture + operations:** [`docs/bootstrap-guardian.md`](docs/bootstrap-guardian.md). Full design-doc chain: `~/.gstack/projects/ava/ava-trio-main-design-20260421-003433.md`.
 
-**Roadmap from here:**
+**Roadmap — state as of 2026-04-24:**
 
-| Slice | What ships | Nova behavior |
+| Phase | What ships | Status |
 |---|---|---|
-| Slice 1 (shipped this branch) | guardian binary, guardianctl, tests, scripts, docs | unchanged — Nova still has Edit/Write |
-| Slice 2 (next) | Remove Edit/Write from Nova's CC spawn args. Add MCP `protected_write` tool in the harness. Feature flag + 48h shadow mode. | Nova writes via MCP tool → guardian enforces |
-| Slice 3 | Journal extensions + log rotation + Telegram delivery events | Observability closes the delta |
-| Graduation gate | 7 clean overnight runs with log-sufficient post-mortems | Phase 1 (alerting) unlocks |
+| 0 | Bootstrap guardian (write-guarding process) + protected_write MCP tool + journal + log rotation | ✅ shipped (+ 3 review-fix batches) |
+| 1 | Alert bus + triage report (bug_alerts schema, heartbeat-gap watchdog, MCP tools) | ✅ shipped (4 slices) |
+| 2 | Nova drafts fix plans (fix_plans schema, cognitive-loop autodraft, owner-reply parser) | ✅ shipped (4 slices) |
+| 3 | Nova opens PRs (git_ops, per-plan worktrees, gh CLI wrapper, start/commit/push MCP tools) | ✅ shipped (5 slices) |
+| 4 | GitHub-native auto-merge for mechanical PRs (fmt-equivalence v1) | 🛠 in progress — slice 1-3 shipping now |
+| 4.1 | Dead-code classifier, toolchain SHA pin, clippy lints pin | deferred (unlocks after 4.0 proves loop) |
+| 5 | Full autonomous coder | future |
+
+Phase 4 design doc: `~/.gstack/projects/khamidov17-multi-agent-voice/ava-phase-0-design-20260424-213709.md`.
+
+Phase 4 operator docs: [`docs/phase4-setup.md`](docs/phase4-setup.md),
+[`docs/phase4-runbook.md`](docs/phase4-runbook.md),
+[`docs/phase4-debugging.md`](docs/phase4-debugging.md).
 
 ## Overview
 
