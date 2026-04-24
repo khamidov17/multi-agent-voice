@@ -208,10 +208,10 @@ async fn check_cc_subprocess(
         .unwrap_or(false);
 
     if !pid_alive {
-        let msg = format!("[CRITICAL] {bot_name} CC subprocess DEAD — PID {pid} not found");
-        error!("{msg}");
-        // Alert owner for DEAD processes — this is critical, not just stale
-        alert_owner(bot, owner_chat_id, &msg).await;
+        // Logged to server log only; owner DM removed 2026-04-23.
+        // See the stale-heartbeat branch below for the rationale.
+        let _ = (bot, owner_chat_id); // retain args for API compat
+        error!("[CRITICAL] {bot_name} CC subprocess DEAD — PID {pid} not found");
         return;
     }
 
@@ -224,10 +224,18 @@ async fn check_cc_subprocess(
 
     let age_secs = now_ms.saturating_sub(heartbeat_ms) / 1000;
     if age_secs > 300 {
-        // >5 min stale = CRITICAL — alert owner directly
-        let msg = format!("[CRITICAL] {bot_name} unresponsive for {age_secs}s (PID {pid})");
-        error!("{msg}");
-        alert_owner(bot, owner_chat_id, &msg).await;
+        // >5 min stale = CRITICAL. Logged to the server log ONLY —
+        // owner notification was removed on 2026-04-23 because this
+        // check fires on every normal cognitive-loop idle window and
+        // spammed the owner's DMs with false alarms every few minutes.
+        // Real failures bubble up through the Phase 1 alerts pipeline
+        // (bug_alerts DB, triage report) where they're deduped and
+        // routed with context. Raw health events stay in the log file
+        // for post-mortem `tail /home/ava/trio-local/logs/nova.log`.
+        let _ = (bot, owner_chat_id); // retain args for API compat
+        error!(
+            "[CRITICAL] {bot_name} unresponsive for {age_secs}s (PID {pid})"
+        );
     } else if age_secs > HEARTBEAT_STALE_SECS {
         warn!(
             "[health] CC subprocess STALE — last heartbeat {age_secs}s ago \
@@ -329,6 +337,12 @@ pub(crate) fn parse_sqlite_datetime_age_secs(ts: &str) -> Option<u64> {
 }
 
 /// Send an alert DM to the owner. Silently swallows errors (best-effort).
+///
+/// **No active callers as of 2026-04-23** — both call sites above were
+/// silenced to stop health-monitor false-positive DM spam. Kept around
+/// (dead-code-allowed) so future policy can reinstate it with a
+/// rate-limit / dedup wrapper without a separate PR to bring it back.
+#[allow(dead_code)]
 async fn alert_owner(bot: &Bot, owner_chat_id: Option<i64>, message: &str) {
     let Some(chat_id) = owner_chat_id else { return };
     if let Err(e) = bot
