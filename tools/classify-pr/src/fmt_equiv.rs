@@ -100,7 +100,8 @@ mod tests {
 
     #[test]
     fn summarize_drift_multi_file_caps_at_three() {
-        let stdout = "Diff in a.rs:1:\nDiff in b.rs:2:\nDiff in c.rs:3:\nDiff in d.rs:4:\nDiff in e.rs:5:\n";
+        let stdout =
+            "Diff in a.rs:1:\nDiff in b.rs:2:\nDiff in c.rs:3:\nDiff in d.rs:4:\nDiff in e.rs:5:\n";
         let s = summarize_drift(stdout);
         assert!(s.contains("5 files"));
         assert!(s.contains("a.rs"));
