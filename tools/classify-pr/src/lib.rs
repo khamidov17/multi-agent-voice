@@ -9,4 +9,5 @@ pub mod classify;
 pub mod exit_codes;
 pub mod fmt_equiv;
 pub mod protected_paths;
+pub mod toolchain;
 pub mod verdict;

@@ -137,6 +137,26 @@ impl Verdict {
         }
     }
 
+    pub fn ineligible_toolchain_drift(human_message: String, embedded_hash: String) -> Self {
+        Self {
+            schema: 1,
+            eligible: false,
+            class: None,
+            reason_code: ReasonCode::ToolchainHashMismatch,
+            human_message,
+            suggested_fix:
+                "Operator: rebuild the classifier (`cargo build --release -p classify-pr`) so its embedded toolchain hash matches the repo's `rust-toolchain.toml`. See docs/phase4-debugging.md#toolchain_hash_mismatch."
+                    .to_string(),
+            alternative_action: Some(AlternativeAction::ManualMerge),
+            protected_paths_touched: Vec::new(),
+            toolchain_sha: Some(embedded_hash),
+            clippy_lints_sha: None,
+            docs_url: format!("{}#toolchain_hash_mismatch", Self::DOCS_BASE),
+            head_sha: None,
+            base_sha: None,
+        }
+    }
+
     pub fn classifier_error(detail: &str) -> Self {
         Self {
             schema: 1,

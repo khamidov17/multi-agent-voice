@@ -132,10 +132,61 @@ jobs:
           path: /tmp/verdict.json
           retention-days: 90
 
+      - name: Check for owner override label
+        id: override
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Per-PR owner override (Phase 4.1, runbook DX-6 tier 2.5):
+          # If the owner applies `automerge:override` to a PR they personally
+          # vouch for, the classifier short-circuits to success. Required:
+          # the label was applied by github.actor matching the OVERRIDE_OWNERS
+          # repo variable (comma-separated logins). Anyone else applying the
+          # label has no effect — we re-fetch from the API and check the
+          # actor on the labeled-event audit, not the current github.actor
+          # (which is the PR opener, not the labeler).
+          HAS_LABEL=$(gh pr view "$PR_NUMBER" --json labels \
+            --jq 'any(.labels[]; .name == "automerge:override")')
+          OWNERS="${{ vars.OVERRIDE_OWNERS }}"
+          if [ "$HAS_LABEL" != "true" ] || [ -z "$OWNERS" ]; then
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Find who actually applied the label by walking the PR timeline
+          # for the most recent `labeled` event with name=automerge:override.
+          # A PR cannot have a label set by anyone other than a repo
+          # collaborator with write access, but we still verify the actor
+          # against the OVERRIDE_OWNERS allowlist.
+          ACTOR=$(gh api \
+            "/repos/${{ github.repository }}/issues/${PR_NUMBER}/timeline?per_page=100" \
+            --paginate \
+            --jq '[.[] | select(.event == "labeled" and .label.name == "automerge:override")] | last | .actor.login // ""')
+          echo "labeled_by=$ACTOR" >> "$GITHUB_OUTPUT"
+          # Comma-separated allowlist match.
+          MATCHED=false
+          IFS=',' read -ra OWNER_LIST <<< "$OWNERS"
+          for o in "${OWNER_LIST[@]}"; do
+            if [ "$ACTOR" = "$(echo "$o" | xargs)" ]; then
+              MATCHED=true
+              break
+            fi
+          done
+          if [ "$MATCHED" = "true" ]; then
+            echo "applied=true" >> "$GITHUB_OUTPUT"
+            echo "Override applied by allowed owner: $ACTOR"
+          else
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            echo "Override label present but applied by '$ACTOR' which is not in OVERRIDE_OWNERS=[$OWNERS] — ignoring"
+          fi
+
       - name: Apply label + required status check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXIT_CODE: ${{ steps.classify.outputs.exit_code }}
+          OVERRIDE_APPLIED: ${{ steps.override.outputs.applied }}
+          OVERRIDE_BY: ${{ steps.override.outputs.labeled_by }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
@@ -144,10 +195,17 @@ jobs:
           # Pull verdict fields for the status check description.
           REASON_CODE=$(jq -r '.reason_code' /tmp/verdict.json)
           HUMAN_MSG=$(jq -r '.human_message' /tmp/verdict.json)
-          # GitHub status check descriptions cap at 140 chars.
           DESC=$(echo "$HUMAN_MSG" | head -c 140)
 
-          if [ "$EXIT_CODE" = "0" ]; then
+          # Owner override short-circuits the verdict: if the override
+          # label is present AND was applied by an allowed owner, force
+          # success regardless of EXIT_CODE. Other CI checks still gate
+          # the merge — override only releases the classifier check.
+          if [ "$OVERRIDE_APPLIED" = "true" ]; then
+            STATE=success
+            DESC="OVERRIDE by $OVERRIDE_BY (verdict was: $REASON_CODE)"
+            gh pr edit "$PR_NUMBER" --add-label "automerge:override-honored" || true
+          elif [ "$EXIT_CODE" = "0" ]; then
             STATE=success
             gh pr edit "$PR_NUMBER" --add-label "automerge:mechanical" || true
           else
