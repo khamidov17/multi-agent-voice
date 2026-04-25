@@ -1,43 +1,93 @@
 # Server Deploy Runbook
 
-What to do on the deploy box (`/home/ava/trio-local/` on the
-DigitalOcean droplet) after PR #1 lands. The Phase 4 setup itself lives
-in `docs/phase4-setup.md`; this doc covers the binary-deployment side:
+What to do on the deploy box (DigitalOcean droplet `159.89.132.178`)
+after PR #1 lands. The Phase 4 setup itself lives in
+`docs/phase4-setup.md`; this doc covers the binary-deployment side:
 build, restart, switch off Atlas, verify.
 
-Assumes:
-- You have SSH access to the deploy box.
-- Repo lives at `/home/ava/trio-local/` (or wherever your `PROJECT_DIR`
-  in `deploy/ctl.sh` points to).
-- `deploy/ctl.sh` is the systemd-unit wrapper from your local box (was
-  gitignored before — kept that way; per-bot service definitions are
-  deploy-state, not repo-state).
+## Reality on the deploy box (audited 2026-04-25)
 
-## 1 — Pull main + build
+The runbook initially assumed a tidy systemd-managed deploy, but the
+actual layout on `159.89.132.178` is messier and worth documenting so
+future deploys don't waste time:
+
+- **Repo** lives at `/home/ava/trio/` (NOT `~/trio-local/`).
+- **Runtime data** lives at `/home/ava/trio-local/` (logs, sqlite DBs,
+  guardian sockets, worktrees) — that's the only thing in `~/trio-local/`.
+- **Bots are launched via raw `nohup` bash one-liners**, NOT via systemd.
+  PPID is 1, no tmux, no screen. The systemd units `ava-nova` /
+  `ava-atlas` / `ava-security` exist but are STALE — they reference an
+  old `/home/ava/ava-agents/target/release/claudir` path that no longer
+  exists. Don't bother with `systemctl start ava-nova`; use the bash
+  pattern below.
+- **Guardian was started the same way** — no `bootstrap-guardian.service`
+  exists; the running guardian is a manually `nohup`'d process.
+- **GitHub auth is not configured** on the box — `git fetch` fails with
+  `could not read Username for 'https://github.com'`. For one-off
+  deploys, ship updates via `git bundle` from the local Mac (see Step 1
+  below). For long-term, set up a deploy key + SSH-based remote, or
+  configure `gh auth login`.
+
+Assumes:
+- You have SSH access to the deploy box (key in `~/.ssh/` on your Mac,
+  authorized in `/home/ava/.ssh/authorized_keys` on the box).
+
+## 1 — Get the latest code onto the box
+
+**If GitHub auth is set up** (PAT or SSH key configured):
 
 ```bash
-ssh ava@159.89.132.178   # DigitalOcean droplet
-cd ~/trio-local
+ssh ava@159.89.132.178
+cd /home/ava/trio
 git fetch origin
-git checkout main
+git checkout phase-0   # or main once we land it
 git pull --ff-only
+```
 
-# Build everything in release mode. First build after the rust-toolchain.toml
-# bump (now pinned to 1.90) will pull the toolchain — about 30s. Subsequent
-# rebuilds reuse it. Both crates build in parallel from the workspace.
-cargo build --release -p trio
-cargo build --release -p bootstrap-guardian
-cargo build --release --manifest-path tools/classify-pr/Cargo.toml
+**If GitHub auth is NOT set up** (current state — see "Reality" section
+above), ship updates via a `git bundle` from your local Mac:
+
+```bash
+# On your local Mac, with the latest commits already pushed to origin:
+git bundle create /tmp/trio-update.bundle phase-0
+scp /tmp/trio-update.bundle ava@159.89.132.178:/tmp/
+
+# Then on the box:
+ssh ava@159.89.132.178
+cd /home/ava/trio
+# Save any deploy-only dirty changes first.
+mkdir -p ~/.trio-deploy-backup
+git diff > ~/.trio-deploy-backup/deploy-dirty-$(date +%Y%m%d-%H%M%S).patch
+git checkout -- .
+git fetch /tmp/trio-update.bundle "+phase-0:refs/remotes/origin/phase-0"
+git reset --hard origin/phase-0
+rm /tmp/trio-update.bundle
+```
+
+## 2 — Build
+
+```bash
+ssh ava@159.89.132.178
+cd /home/ava/trio
+
+# rust-toolchain.toml pins 1.90. First build after the pin bump pulls the
+# toolchain via rustup (~30s download). On a 2 GB / 1 vCPU droplet, the
+# trio crate alone takes ~22 min cold; subsequent rebuilds are ~1-2 min.
+# Plan for half an hour total on first deploy.
+cargo build --release
+cd bootstrap-guardian && cargo build --release && cd ..
+cd tools/classify-pr && cargo build --release && cd ../..
 
 # Verify the new binaries.
-./target/release/trio --help 2>&1 | head -3 || true
-./bootstrap-guardian/target/release/guardianctl status
-./tools/classify-pr/target/release/classify-pr --version
+ls -lh target/release/trio \
+       bootstrap-guardian/target/release/bootstrap-guardian \
+       bootstrap-guardian/target/release/guardianctl \
+       tools/classify-pr/target/release/classify-pr
 ```
 
 If `cargo build` fails, do NOT proceed. Read the error, fix, retry.
 Common cause: the server's `rustup` is out of date — run
-`rustup update stable` then retry.
+`rustup update` then retry.
 
 ## 2 — Stop the running bots
 
@@ -111,17 +161,47 @@ mv ~/trio-local/atlas.json.disabled ~/trio-local/atlas.json
 sudo systemctl restart ava-atlas
 ```
 
-## 4 — Restart the guardian + Nova
+## 4 — Restart the guardian + Nova (raw `nohup` pattern)
+
+The systemd units are stale. Use raw `nohup` to match what's actually
+launching the bots today.
 
 ```bash
-# Guardian first (Nova depends on the UDS socket).
-sudo systemctl restart bootstrap-guardian
-./bootstrap-guardian/target/release/guardianctl status
-# Should print "running" with paused=false, allowed_uids=[<ava's uid>]
+# 4a — kill any running guardian (PID changes per run, find with pgrep)
+GUARDIAN_PID=$(pgrep -f bootstrap-guardian)
+if [ -n "$GUARDIAN_PID" ]; then
+  kill "$GUARDIAN_PID"
+  for _ in 1 2 3 4 5; do kill -0 "$GUARDIAN_PID" 2>/dev/null || break; sleep 1; done
+fi
+rm -f /home/ava/trio-local/run/bootstrap-guardian.sock
 
-# Then Nova.
-sudo systemctl start ava-nova
-sudo ./deploy/ctl.sh status
+# 4b — start the new guardian
+# CRITICAL: --env dev. The new binary defaults to TRIO_ENV=prod, but
+# /home/ava/trio-local/guardian.json only has a `dev` block. Without
+# the flag the guardian crashes with: 'config has no block for
+# TRIO_ENV="prod"'. Same for guardianctl — set TRIO_ENV=dev as an env
+# var or pass the right config path.
+cd /home/ava/trio
+nohup /home/ava/trio/bootstrap-guardian/target/release/bootstrap-guardian \
+    --config /home/ava/trio-local/guardian.json \
+    --env dev \
+    > /home/ava/trio-local/logs/guardian.log 2>&1 &
+disown
+sleep 2
+
+# 4c — verify guardian is up (note TRIO_ENV=dev for guardianctl too)
+TRIO_ENV=dev /home/ava/trio/bootstrap-guardian/target/release/guardianctl \
+    --config /home/ava/trio-local/guardian.json \
+    status
+# Should print: socket: /home/ava/trio-local/run/bootstrap-guardian.sock ... OK
+#               pause flag: absent
+
+# 4d — start Nova (Atlas stays disabled per Step 3)
+RUST_LOG=info nohup /home/ava/trio/target/release/trio /home/ava/trio/nova.json \
+    > /home/ava/trio-local/logs/nova.log 2>&1 &
+disown
+sleep 4
+pgrep -af "/trio /home/ava/trio/nova.json"
 ```
 
 Expected `ctl.sh status` after restart:
