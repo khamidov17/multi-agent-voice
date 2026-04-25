@@ -35,17 +35,20 @@ jobs:
     # in this repo by policy — owner reviews them manually).
     if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      # Checkout `main`'s tools/classify-pr/ — NEVER the PR branch.
-      # This is the ENG-D1 security fix: the classifier binary must be the
-      # one from main, not a version the PR could have rewritten.
+      # Checkout `main` — NEVER the PR branch. This is the ENG-D1 security
+      # fix: the classifier binary must be the one from main, not a version
+      # the PR could have rewritten.
+      #
+      # Full clone (no sparse-checkout). The first cut tried sparse-checkout
+      # of just `tools/classify-pr/` + `rust-toolchain.toml`, but cargo's
+      # gitignore walker bailed with "Failed to update the excludes stack"
+      # because it couldn't find the root `.gitignore`. The repo's small
+      # enough that a full clone is fine — trust comes from `ref` pointing
+      # at main, not from minimizing the file set.
       - name: Checkout base branch (trusted classifier source)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.ref }}
-          sparse-checkout: |
-            tools/classify-pr
-            rust-toolchain.toml
-          sparse-checkout-cone-mode: false
 
       - name: Install rust toolchain from pin
         uses: dtolnay/rust-toolchain@stable
