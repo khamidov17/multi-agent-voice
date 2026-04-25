@@ -1674,9 +1674,7 @@ fn wait_for_result(
                                     tool_calls: Vec::new(),
                                     compacted: false,
                                     action: "stop".to_string(),
-                                    reason: Some(
-                                        "synthetic-response loop detected".to_string(),
-                                    ),
+                                    reason: Some("synthetic-response loop detected".to_string()),
                                     sleep_ms: None,
                                     dropped_text: None,
                                 },

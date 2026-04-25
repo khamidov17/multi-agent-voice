@@ -52,15 +52,14 @@ fn worktree_manager<'a>(
     config: &'a ChatbotConfig,
     tool: &str,
 ) -> Result<&'a std::sync::Arc<crate::chatbot::worktree::WorktreeManager>, String> {
-    config
-        .worktree_manager
-        .as_ref()
-        .ok_or_else(|| format!(
+    config.worktree_manager.as_ref().ok_or_else(|| {
+        format!(
             "{} requires Phase 3 worktree_manager to be configured. Set \
              `repo_path` in nova.json so the harness can create worktrees \
              inside guardian's allowed_roots.",
             tool
-        ))
+        )
+    })
 }
 
 fn fix_plans_db_path(config: &ChatbotConfig) -> Result<PathBuf, String> {
@@ -130,9 +129,7 @@ fn derive_handle(
     plan_id: i64,
     base_branch: &str,
 ) -> WorktreeHandle {
-    let worktree_path = mgr
-        .worktrees_root
-        .join(format!("plan-{}", plan_id));
+    let worktree_path = mgr.worktrees_root.join(format!("plan-{}", plan_id));
     WorktreeHandle {
         plan_id,
         worktree_path,
@@ -154,8 +151,7 @@ pub fn execute_commit_and_push(
     let plans_db = fix_plans_db_path(config)?;
     let conn = rusqlite::Connection::open(&plans_db)
         .map_err(|e| format!("commit_and_push: open {}: {}", plans_db.display(), e))?;
-    fix_plans::init_schema(&conn)
-        .map_err(|e| format!("commit_and_push: init_schema: {}", e))?;
+    fix_plans::init_schema(&conn).map_err(|e| format!("commit_and_push: init_schema: {}", e))?;
     let plan = fix_plans::get_plan(&conn, plan_id)
         .ok_or_else(|| format!("commit_and_push: plan #{} not found", plan_id))?;
     if plan.status != FixPlanStatus::Approved {
@@ -221,8 +217,7 @@ pub fn execute_open_pr(
     let plans_db = fix_plans_db_path(config)?;
     let conn = rusqlite::Connection::open(&plans_db)
         .map_err(|e| format!("open_pr: open {}: {}", plans_db.display(), e))?;
-    fix_plans::init_schema(&conn)
-        .map_err(|e| format!("open_pr: init_schema: {}", e))?;
+    fix_plans::init_schema(&conn).map_err(|e| format!("open_pr: init_schema: {}", e))?;
     let plan = fix_plans::get_plan(&conn, plan_id)
         .ok_or_else(|| format!("open_pr: plan #{} not found", plan_id))?;
     if plan.status != FixPlanStatus::Approved {

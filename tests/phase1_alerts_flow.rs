@@ -16,11 +16,9 @@
 //! Closes the "Phase 1 has no main-crate integration harness" gap
 //! parallel to `tests/phase0_protected_write.rs`.
 
-use trio::chatbot::alerts::{
-    self, AlertsWriter, BugAlert, Severity,
-};
 use serde_json::json;
 use serial_test::serial;
+use trio::chatbot::alerts::{self, AlertsWriter, BugAlert, Severity};
 
 #[tokio::test]
 #[serial]
@@ -116,7 +114,10 @@ async fn triaged_alert_reappears_on_regression() {
     for _ in 0..20 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let conn = rusqlite::Connection::open(&db).unwrap();
-        if !alerts::query_open_alerts(&conn, None, None, None).unwrap().is_empty() {
+        if !alerts::query_open_alerts(&conn, None, None, None)
+            .unwrap()
+            .is_empty()
+        {
             break;
         }
     }
@@ -129,7 +130,11 @@ async fn triaged_alert_reappears_on_regression() {
         let id = rows[0].id;
         let closed = alerts::mark_triaged(&conn, &[id], Some("restarted nova")).unwrap();
         assert_eq!(closed, 1);
-        assert!(alerts::query_open_alerts(&conn, None, None, None).unwrap().is_empty());
+        assert!(
+            alerts::query_open_alerts(&conn, None, None, None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // Bug recurs. Writer upserts — the module invariant is that a
@@ -194,13 +199,7 @@ async fn category_filter_and_severity_ordering() {
             // Ordered by severity — critical first.
             assert_eq!(all[0].severity, Severity::Critical);
             // Category filter scopes correctly.
-            let tg = alerts::query_open_alerts(
-                &conn,
-                None,
-                Some("telegram.error"),
-                None,
-            )
-            .unwrap();
+            let tg = alerts::query_open_alerts(&conn, None, Some("telegram.error"), None).unwrap();
             assert_eq!(tg.len(), 2);
             assert!(tg.iter().all(|r| r.category == "telegram.error"));
             return;

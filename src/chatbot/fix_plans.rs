@@ -162,10 +162,7 @@ pub fn init_schema(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
 /// plan for this `alert_id` in a non-terminal status (`draft`/`sent`):
 /// Nova must resolve or mark obsolete the existing plan first. This
 /// prevents accidental plan spam.
-pub fn draft_plan(
-    conn: &rusqlite::Connection,
-    plan: &FixPlan,
-) -> Result<FixPlanRow, DraftError> {
+pub fn draft_plan(conn: &rusqlite::Connection, plan: &FixPlan) -> Result<FixPlanRow, DraftError> {
     // Guard: must not have an open (non-terminal) plan already for this
     // alert_id. Look up via a tiny query to avoid a race between caller
     // and writer.
@@ -206,8 +203,7 @@ pub fn draft_plan(
     )
     .map_err(DraftError::Sqlite)?;
     let id = conn.last_insert_rowid();
-    get_plan(conn, id)
-        .ok_or(DraftError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+    get_plan(conn, id).ok_or(DraftError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
 }
 
 #[derive(Debug)]
@@ -431,11 +427,17 @@ impl FixPlansWriter {
                         WriterMsg::Draft(p) => {
                             let alert_id = p.alert_id;
                             let r = draft_plan(&conn, &p);
-                            (Op::Draft { alert_id }, r.map(|row| row.id).map_err(|e| e.to_string()))
+                            (
+                                Op::Draft { alert_id },
+                                r.map(|row| row.id).map_err(|e| e.to_string()),
+                            )
                         }
                         WriterMsg::SetStatus { id, status, note } => {
                             let r = update_status(&conn, id, status, note.as_deref());
-                            (Op::SetStatus { id, status }, r.map(|row| row.id).map_err(|e| e.to_string()))
+                            (
+                                Op::SetStatus { id, status },
+                                r.map(|row| row.id).map_err(|e| e.to_string()),
+                            )
                         }
                     }
                 })
@@ -466,10 +468,7 @@ impl FixPlansWriter {
     }
 
     pub fn set_status(&self, id: i64, status: FixPlanStatus, note: Option<String>) {
-        if let Err(e) = self
-            .tx
-            .try_send(WriterMsg::SetStatus { id, status, note })
-        {
+        if let Err(e) = self.tx.try_send(WriterMsg::SetStatus { id, status, note }) {
             warn!(err = %e, "fix_plans writer queue full/closed — dropping status update");
         }
     }
@@ -533,8 +532,7 @@ mod tests {
     fn draft_unblocked_after_terminal_status() {
         let conn = open_inmem();
         let r1 = draft_plan(&conn, &mkplan(42, "v1")).unwrap();
-        update_status(&conn, r1.id, FixPlanStatus::Obsolete, Some("scope cut"))
-            .unwrap();
+        update_status(&conn, r1.id, FixPlanStatus::Obsolete, Some("scope cut")).unwrap();
         let r2 = draft_plan(&conn, &mkplan(42, "v2"))
             .expect("terminal predecessor unblocks a new draft");
         assert_ne!(r2.id, r1.id);
@@ -546,8 +544,7 @@ mod tests {
         let r = draft_plan(&conn, &mkplan(1, "x")).unwrap();
         let r2 = update_status(&conn, r.id, FixPlanStatus::Sent, None).unwrap();
         assert_eq!(r2.status, FixPlanStatus::Sent);
-        let r3 = update_status(&conn, r.id, FixPlanStatus::Approved, Some("lgtm"))
-            .unwrap();
+        let r3 = update_status(&conn, r.id, FixPlanStatus::Approved, Some("lgtm")).unwrap();
         assert_eq!(r3.status, FixPlanStatus::Approved);
         assert_eq!(r3.decision_note.as_deref(), Some("lgtm"));
     }
@@ -558,12 +555,10 @@ mod tests {
         let r = draft_plan(&conn, &mkplan(1, "x")).unwrap();
         // draft → approved (skipping sent) is not a valid edge; owners
         // approve only AFTER Nova sends.
-        let err = update_status(&conn, r.id, FixPlanStatus::Approved, None)
-            .unwrap_err();
+        let err = update_status(&conn, r.id, FixPlanStatus::Approved, None).unwrap_err();
         matches!(err, UpdateStatusError::InvalidTransition { .. });
         // draft → implemented would bypass human review entirely. No.
-        let err2 = update_status(&conn, r.id, FixPlanStatus::Implemented, None)
-            .unwrap_err();
+        let err2 = update_status(&conn, r.id, FixPlanStatus::Implemented, None).unwrap_err();
         matches!(err2, UpdateStatusError::InvalidTransition { .. });
     }
 
@@ -574,12 +569,9 @@ mod tests {
         update_status(&conn, r.id, FixPlanStatus::Sent, None).unwrap();
         update_status(&conn, r.id, FixPlanStatus::Approved, None).unwrap();
         // approved → rejected would be a confusing walk-back; not allowed.
-        assert!(
-            update_status(&conn, r.id, FixPlanStatus::Rejected, None).is_err()
-        );
+        assert!(update_status(&conn, r.id, FixPlanStatus::Rejected, None).is_err());
         // approved → implemented is the only forward move.
-        let imp = update_status(&conn, r.id, FixPlanStatus::Implemented, None)
-            .unwrap();
+        let imp = update_status(&conn, r.id, FixPlanStatus::Implemented, None).unwrap();
         assert_eq!(imp.status, FixPlanStatus::Implemented);
     }
 

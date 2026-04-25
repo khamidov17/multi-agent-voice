@@ -7,9 +7,7 @@
 //! synchronous results (e.g. the new plan id).
 
 use crate::chatbot::engine::ChatbotConfig;
-use crate::chatbot::fix_plans::{
-    self, FixPlan, FixPlanRow, FixPlanStatus,
-};
+use crate::chatbot::fix_plans::{self, FixPlan, FixPlanRow, FixPlanStatus};
 use crate::chatbot::telegram::TelegramClient;
 use serde_json::json;
 use std::path::PathBuf;
@@ -40,8 +38,7 @@ fn open(config: &ChatbotConfig, tool: &str) -> Result<rusqlite::Connection, Stri
     let p = db_path(config)?;
     let conn = rusqlite::Connection::open(&p)
         .map_err(|e| format!("{}: open {}: {}", tool, p.display(), e))?;
-    fix_plans::init_schema(&conn)
-        .map_err(|e| format!("{}: init_schema: {}", tool, e))?;
+    fix_plans::init_schema(&conn).map_err(|e| format!("{}: init_schema: {}", tool, e))?;
     Ok(conn)
 }
 
@@ -65,24 +62,31 @@ pub fn execute_draft_fix_plan(
         test_plan: test_plan.to_string(),
     };
     match fix_plans::draft_plan(&conn, &plan) {
-        Ok(row) => Ok(Some(json!({
-            "plan_id": row.id,
-            "status": row.status.as_str(),
-            "alert_id": row.alert_id,
-            "created_at": row.created_at,
-        }).to_string())),
+        Ok(row) => Ok(Some(
+            json!({
+                "plan_id": row.id,
+                "status": row.status.as_str(),
+                "alert_id": row.alert_id,
+                "created_at": row.created_at,
+            })
+            .to_string(),
+        )),
         // Surface the "non-terminal predecessor" case as a structured
         // response so Nova can reason about it, not as an opaque error.
-        Err(fix_plans::DraftError::NonTerminalExists { existing_id, existing_status }) => {
-            Ok(Some(json!({
+        Err(fix_plans::DraftError::NonTerminalExists {
+            existing_id,
+            existing_status,
+        }) => Ok(Some(
+            json!({
                 "error": "non_terminal_plan_exists",
                 "existing_id": existing_id,
                 "existing_status": existing_status,
                 "hint": "Call update_fix_plan_status with new_status='obsolete' \
                         on the existing plan, or send it to the owner first \
                         to move past draft. Then retry this draft."
-            }).to_string()))
-        }
+            })
+            .to_string(),
+        )),
         Err(e) => Err(format!("draft_fix_plan: {}", e)),
     }
 }
@@ -95,9 +99,10 @@ pub fn execute_list_fix_plans(
     require_tier1(config, "list_fix_plans")?;
     let conn = open(config, "list_fix_plans")?;
     let status_filter = match status {
-        Some(s) => Some(FixPlanStatus::parse(s).ok_or_else(|| {
-            format!("list_fix_plans: unknown status '{}'", s)
-        })?),
+        Some(s) => Some(
+            FixPlanStatus::parse(s)
+                .ok_or_else(|| format!("list_fix_plans: unknown status '{}'", s))?,
+        ),
         None => None,
     };
     let effective_limit = limit
@@ -105,10 +110,13 @@ pub fn execute_list_fix_plans(
         .unwrap_or(LIST_DEFAULT_LIMIT);
     let rows = fix_plans::list_plans(&conn, status_filter, Some(effective_limit))
         .map_err(|e| format!("list_fix_plans: {}", e))?;
-    Ok(Some(json!({
-        "total": rows.len(),
-        "plans": rows.iter().map(plan_to_json).collect::<Vec<_>>(),
-    }).to_string()))
+    Ok(Some(
+        json!({
+            "total": rows.len(),
+            "plans": rows.iter().map(plan_to_json).collect::<Vec<_>>(),
+        })
+        .to_string(),
+    ))
 }
 
 fn plan_to_json(p: &FixPlanRow) -> serde_json::Value {
@@ -143,11 +151,14 @@ pub fn execute_update_fix_plan_status(
     })?;
     let conn = open(config, "update_fix_plan_status")?;
     match fix_plans::update_status(&conn, plan_id, new_status_parsed, note) {
-        Ok(row) => Ok(Some(json!({
-            "plan_id": row.id,
-            "status": row.status.as_str(),
-            "updated_at": row.updated_at,
-        }).to_string())),
+        Ok(row) => Ok(Some(
+            json!({
+                "plan_id": row.id,
+                "status": row.status.as_str(),
+                "updated_at": row.updated_at,
+            })
+            .to_string(),
+        )),
         Err(e) => Err(format!("update_fix_plan_status: {}", e)),
     }
 }
@@ -201,11 +212,14 @@ pub async fn execute_send_fix_plan_to_owner(
     )
     .map_err(|e| format!("send_fix_plan_to_owner: status transition: {}", e))?;
 
-    Ok(Some(json!({
-        "sent_message_id": sent,
-        "plan_id": plan_id,
-        "new_status": "sent",
-    }).to_string()))
+    Ok(Some(
+        json!({
+            "sent_message_id": sent,
+            "plan_id": plan_id,
+            "new_status": "sent",
+        })
+        .to_string(),
+    ))
 }
 
 /// Format a plan as Telegram markdown. Harness-side so Nova can't drift
@@ -233,13 +247,9 @@ fn format_plan_markdown(preamble: &str, p: &FixPlanRow) -> String {
     out.push_str("\n\n");
     out.push_str("*Test plan*\n");
     out.push_str(p.test_plan.trim());
-    out.push_str(
-        "\n\n_Reply with `approve #",
-    );
+    out.push_str("\n\n_Reply with `approve #");
     out.push_str(&p.id.to_string());
-    out.push_str(
-        "` or `reject #",
-    );
+    out.push_str("` or `reject #");
     out.push_str(&p.id.to_string());
     out.push_str("` + reason._");
     out

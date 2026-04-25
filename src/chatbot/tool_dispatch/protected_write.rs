@@ -204,9 +204,7 @@ pub(super) async fn execute_protected_write(
             format!("guardian.deny: {}", denial_reason),
             format!("path={} reason={}", safe_path, safe_reason),
         ),
-        WriteResult::Err {
-            code, message, ..
-        } => (
+        WriteResult::Err { code, message, .. } => (
             journal::ENTRY_GUARDIAN_ERROR,
             format!("guardian.error: {} ({})", code.as_str(), message),
             format!("path={} reason={}", safe_path, safe_reason),
@@ -218,7 +216,15 @@ pub(super) async fn execute_protected_write(
     } else {
         let db = database.lock().await;
         let conn = db.connection();
-        journal::emit(conn, None, event_entry, &event_summary, &event_detail, &[], &tags);
+        journal::emit(
+            conn,
+            None,
+            event_entry,
+            &event_summary,
+            &event_detail,
+            &[],
+            &tags,
+        );
     }
 
     // Build the tool result body from the typed write outcome. The

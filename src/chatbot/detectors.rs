@@ -109,10 +109,7 @@ pub fn spawn_heartbeat_watchdog(
                 // encode the bucket into the summary string (which IS
                 // part of the fingerprint).
                 let bucket = bucket_gap_secs(gap_secs);
-                let summary = format!(
-                    "{}: claude subprocess heartbeat gap ≥{}s",
-                    bot_name, bucket
-                );
+                let summary = format!("{}: claude subprocess heartbeat gap ≥{}s", bot_name, bucket);
                 let alert = BugAlert::new(
                     format!("{}-watchdog", bot_name.to_lowercase()),
                     Severity::High,
@@ -346,8 +343,7 @@ mod tests {
         assert!(classify_journal_row("Nova", &row("tool_call", "send_message ok")).is_none());
         assert!(classify_journal_row("Nova", &row("guardian.allow", "wrote 42 bytes")).is_none());
         assert!(
-            classify_journal_row("Nova", &row("guardian.deny", "path blocked"))
-                .is_none(),
+            classify_journal_row("Nova", &row("guardian.deny", "path blocked")).is_none(),
             "guardian.deny is expected behavior, never an alert"
         );
         assert!(classify_journal_row("Nova", &row("tg.send", "status 200")).is_none());
@@ -379,7 +375,10 @@ mod tests {
     fn classify_catches_crashed_as_critical() {
         let a = classify_journal_row(
             "Nova",
-            &row("subprocess.exit", "Claude Code subprocess exited unexpectedly"),
+            &row(
+                "subprocess.exit",
+                "Claude Code subprocess exited unexpectedly",
+            ),
         )
         .expect("'subprocess exited' keyword must classify");
         assert_eq!(a.severity, Severity::Critical);

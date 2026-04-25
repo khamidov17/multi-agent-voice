@@ -23,9 +23,9 @@
 //! Body is unbounded but passed via stdin so there's no arg-length
 //! explosion risk.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::io::Write;
 use tracing::{debug, warn};
 
 use crate::chatbot::git_ops;
@@ -45,7 +45,11 @@ pub enum GhError {
 impl std::fmt::Display for GhError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GhError::CommandFailed { args, status, stderr } => write!(
+            GhError::CommandFailed {
+                args,
+                status,
+                stderr,
+            } => write!(
                 f,
                 "gh {} failed (status={:?}): {}",
                 args.join(" "),
@@ -164,7 +168,9 @@ pub fn create_pr(
 
     // Feed the body on stdin. gh reads until EOF.
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(body.as_bytes()).map_err(GhError::SpawnFailed)?;
+        stdin
+            .write_all(body.as_bytes())
+            .map_err(GhError::SpawnFailed)?;
     }
     let output = child.wait_with_output().map_err(GhError::SpawnFailed)?;
     if !output.status.success() {
@@ -198,20 +204,14 @@ pub fn create_pr(
 pub fn extract_pr_number(url: &str) -> Option<u64> {
     let after = url.rsplit("/pull/").next()?;
     // `after` might be `42`, `42/`, `42?x=y`, `42/files`.
-    let digits: String = after
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
+    let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
 }
 
 /// Quick "is there already an open PR for `head_branch`?" check.
 /// Returns the PR URL if one exists, None otherwise. Uses `gh pr list
 /// --head <branch> --state open --json url --jq '.[0].url'`.
-pub fn existing_pr_for_branch(
-    repo_dir: &Path,
-    head_branch: &str,
-) -> Result<Option<String>> {
+pub fn existing_pr_for_branch(repo_dir: &Path, head_branch: &str) -> Result<Option<String>> {
     git_ops::validate_branch_name(head_branch)
         .map_err(|e| GhError::InvalidArg(format!("bad head branch: {}", e)))?;
     let output = Command::new("gh")
@@ -232,7 +232,12 @@ pub fn existing_pr_for_branch(
         .map_err(GhError::SpawnFailed)?;
     if !output.status.success() {
         return Err(GhError::CommandFailed {
-            args: vec!["pr".into(), "list".into(), "--head".into(), head_branch.into()],
+            args: vec![
+                "pr".into(),
+                "list".into(),
+                "--head".into(),
+                head_branch.into(),
+            ],
             status: output.status.code(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         });
@@ -290,9 +295,6 @@ mod tests {
     fn extract_pr_number_returns_none_for_non_pr_urls() {
         assert_eq!(extract_pr_number(""), None);
         assert_eq!(extract_pr_number("https://example.com/other/path"), None);
-        assert_eq!(
-            extract_pr_number("https://github.com/owner/repo"),
-            None
-        );
+        assert_eq!(extract_pr_number("https://github.com/owner/repo"), None);
     }
 }

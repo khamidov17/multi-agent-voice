@@ -763,10 +763,7 @@ pub enum ToolCall {
     /// description or owner status update. Refuses if the worktree
     /// is clean (nothing to commit) — that's almost always Nova
     /// forgetting to write files first.
-    CommitAndPush {
-        plan_id: i64,
-        message: String,
-    },
+    CommitAndPush { plan_id: i64, message: String },
 
     /// Phase 3 — open the PR for this plan via `gh pr create`. Body
     /// is the plan's markdown (formatted harness-side), base is the

@@ -19,7 +19,6 @@ pub mod format;
 pub mod gemini;
 pub mod gh_cli;
 pub mod git_ops;
-pub mod worktree;
 pub mod health;
 pub mod journal;
 pub mod message;
@@ -38,6 +37,7 @@ pub mod tts;
 pub mod verify;
 pub mod whisper;
 pub mod workflow;
+pub mod worktree;
 pub mod yandex;
 
 pub use claude_code::ClaudeCode;

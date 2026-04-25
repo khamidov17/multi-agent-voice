@@ -263,9 +263,10 @@ impl BotState {
                     if !config.full_permissions {
                         None
                     } else {
-                        let repo_path = config.repo_path.clone().or_else(|| {
-                            std::env::current_dir().ok()
-                        });
+                        let repo_path = config
+                            .repo_path
+                            .clone()
+                            .or_else(|| std::env::current_dir().ok());
                         match repo_path {
                             Some(rp) => {
                                 match crate::chatbot::worktree::WorktreeManager::new(
@@ -291,7 +292,9 @@ impl BotState {
                                 }
                             }
                             None => {
-                                warn!("no repo_path and no cwd; Phase 3 implementation tools disabled");
+                                warn!(
+                                    "no repo_path and no cwd; Phase 3 implementation tools disabled"
+                                );
                                 None
                             }
                         }
@@ -816,7 +819,9 @@ async fn main() {
     let log_path = log_dir.join("trio.log");
     let rotator = file_rotate::FileRotate::new(
         &log_path,
-        file_rotate::suffix::AppendTimestamp::default(file_rotate::suffix::FileLimit::MaxFiles(168)),
+        file_rotate::suffix::AppendTimestamp::default(file_rotate::suffix::FileLimit::MaxFiles(
+            168,
+        )),
         file_rotate::ContentLimit::BytesSurpassed(100 * 1024 * 1024),
         file_rotate::compression::Compression::None,
         None, // default unix mode
@@ -1248,12 +1253,9 @@ async fn handle_dm(
                     .ok();
             }
             None => {
-                bot.send_message(
-                    msg.chat.id,
-                    "⚠️ live_app_url not configured in trio.json",
-                )
-                .await
-                .ok();
+                bot.send_message(msg.chat.id, "⚠️ live_app_url not configured in trio.json")
+                    .await
+                    .ok();
             }
         }
         return Ok(());

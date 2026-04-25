@@ -1,16 +1,16 @@
 //! Tool dispatch — all execute_* functions for MCP tool calls.
 
 mod delegation;
+mod fix_plans;
+mod implementation;
 mod memory;
 mod messaging;
 mod moderation;
 mod planning;
-mod fix_plans;
-mod implementation;
 mod protected_write;
 mod reflection;
-mod triage;
 mod tools_custom;
+mod triage;
 mod utility;
 
 // Re-export helpers that are used from outside this module
@@ -718,12 +718,9 @@ pub(crate) async fn execute_tool(
             plan_id,
             new_status,
             note,
-        } => fix_plans::execute_update_fix_plan_status(
-            config,
-            *plan_id,
-            new_status,
-            note.as_deref(),
-        ),
+        } => {
+            fix_plans::execute_update_fix_plan_status(config, *plan_id, new_status, note.as_deref())
+        }
         ToolCall::SendFixPlanToOwner {
             plan_id,
             chat_id,
@@ -737,11 +734,7 @@ pub(crate) async fn execute_tool(
         ToolCall::StartImplementation {
             plan_id,
             base_branch,
-        } => implementation::execute_start_implementation(
-            config,
-            *plan_id,
-            base_branch.as_deref(),
-        ),
+        } => implementation::execute_start_implementation(config, *plan_id, base_branch.as_deref()),
         ToolCall::CommitAndPush { plan_id, message } => {
             implementation::execute_commit_and_push(config, *plan_id, message)
         }
@@ -749,12 +742,7 @@ pub(crate) async fn execute_tool(
             plan_id,
             title,
             draft,
-        } => implementation::execute_open_pr(
-            config,
-            *plan_id,
-            title.as_deref(),
-            *draft,
-        ),
+        } => implementation::execute_open_pr(config, *plan_id, title.as_deref(), *draft),
         ToolCall::Done => Ok(None),
         ToolCall::ParseError { message } => Err(message.clone()),
     };
