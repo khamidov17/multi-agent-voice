@@ -200,8 +200,7 @@ pub fn upsert_alert(
     conn: &rusqlite::Connection,
     alert: &BugAlert,
 ) -> rusqlite::Result<UpsertResult> {
-    let evidence_json =
-        serde_json::to_string(&alert.evidence).unwrap_or_else(|_| "{}".to_string());
+    let evidence_json = serde_json::to_string(&alert.evidence).unwrap_or_else(|_| "{}".to_string());
     // ON CONFLICT path bumps count+last_seen and clears triaged state.
     // RETURNING lets us tell the caller whether this was a new alert or
     // a dedup, which feeds the "first occurrence vs repeat" behavior in
@@ -564,7 +563,10 @@ mod tests {
         assert_eq!(r2.count, 2);
         assert_eq!(r3.count, 3);
         assert_eq!(r1.id, r2.id, "dedup should not create new row");
-        assert_eq!(r2.first_seen_at, r3.first_seen_at, "first_seen must be stable");
+        assert_eq!(
+            r2.first_seen_at, r3.first_seen_at,
+            "first_seen must be stable"
+        );
         assert!(!r2.is_first_occurrence);
     }
 
@@ -579,7 +581,10 @@ mod tests {
             json!({"exit_code": 137}),
         );
         let r1 = upsert_alert(&conn, &alert).unwrap();
-        assert_eq!(mark_triaged(&conn, &[r1.id], Some("investigated")).unwrap(), 1);
+        assert_eq!(
+            mark_triaged(&conn, &[r1.id], Some("investigated")).unwrap(),
+            1
+        );
         // A retrigger should clear the triaged flag — regressions re-surface.
         let _r2 = upsert_alert(&conn, &alert).unwrap();
         let open = query_open_alerts(&conn, None, None, None).unwrap();
@@ -642,11 +647,16 @@ mod tests {
         .unwrap();
         upsert_alert(
             &conn,
-            &BugAlert::new("sentinel", Severity::High, "subprocess.crash", "b", json!({})),
+            &BugAlert::new(
+                "sentinel",
+                Severity::High,
+                "subprocess.crash",
+                "b",
+                json!({}),
+            ),
         )
         .unwrap();
-        let rows =
-            query_open_alerts(&conn, None, Some("telegram.error"), None).unwrap();
+        let rows = query_open_alerts(&conn, None, Some("telegram.error"), None).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].category, "telegram.error");
     }
@@ -708,7 +718,10 @@ mod tests {
         let conn = rusqlite::Connection::open(&db).unwrap();
         let rows = query_open_alerts(&conn, None, None, None).unwrap();
         assert_eq!(rows.len(), 2, "dedup should collapse the two 429s");
-        let tg = rows.iter().find(|r| r.category == "telegram.error").unwrap();
+        let tg = rows
+            .iter()
+            .find(|r| r.category == "telegram.error")
+            .unwrap();
         assert_eq!(tg.count, 2);
         let crash = rows
             .iter()

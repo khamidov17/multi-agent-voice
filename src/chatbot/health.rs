@@ -233,9 +233,7 @@ async fn check_cc_subprocess(
         // routed with context. Raw health events stay in the log file
         // for post-mortem `tail /home/ava/trio-local/logs/nova.log`.
         let _ = (bot, owner_chat_id); // retain args for API compat
-        error!(
-            "[CRITICAL] {bot_name} unresponsive for {age_secs}s (PID {pid})"
-        );
+        error!("[CRITICAL] {bot_name} unresponsive for {age_secs}s (PID {pid})");
     } else if age_secs > HEARTBEAT_STALE_SECS {
         warn!(
             "[health] CC subprocess STALE — last heartbeat {age_secs}s ago \

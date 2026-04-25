@@ -7,11 +7,11 @@
 //! unit tests inside `tool_dispatch/fix_plans.rs` and the parser has
 //! its own tests in `fix_plan_reply.rs`.
 
-use trio::chatbot::fix_plan_reply::{parse_owner_reply, OwnerReply};
+use serial_test::serial;
+use trio::chatbot::fix_plan_reply::{OwnerReply, parse_owner_reply};
 use trio::chatbot::fix_plans::{
     self, DraftError, FixPlan, FixPlanStatus, FixPlansWriter, UpdateStatusError,
 };
-use serial_test::serial;
 
 fn mkplan(alert_id: i64, title: &str) -> FixPlan {
     FixPlan {
@@ -51,13 +51,8 @@ async fn full_lifecycle_draft_to_sent_to_approved_to_implemented() {
             note: Some(_)
         }
     ));
-    let row = fix_plans::update_status(
-        &conn,
-        plan_id,
-        FixPlanStatus::Approved,
-        Some("looks good"),
-    )
-    .expect("sent → approved");
+    let row = fix_plans::update_status(&conn, plan_id, FixPlanStatus::Approved, Some("looks good"))
+        .expect("sent → approved");
     assert_eq!(row.status, FixPlanStatus::Approved);
     assert_eq!(row.decision_note.as_deref(), Some("looks good"));
 
@@ -134,18 +129,15 @@ async fn invalid_transitions_are_refused() {
 
     let r = fix_plans::draft_plan(&conn, &mkplan(1, "x")).unwrap();
     // draft → approved must go through sent first.
-    let err = fix_plans::update_status(&conn, r.id, FixPlanStatus::Approved, None)
-        .unwrap_err();
+    let err = fix_plans::update_status(&conn, r.id, FixPlanStatus::Approved, None).unwrap_err();
     matches!(err, UpdateStatusError::InvalidTransition { .. });
     // draft → implemented would skip human review entirely.
-    let err = fix_plans::update_status(&conn, r.id, FixPlanStatus::Implemented, None)
-        .unwrap_err();
+    let err = fix_plans::update_status(&conn, r.id, FixPlanStatus::Implemented, None).unwrap_err();
     matches!(err, UpdateStatusError::InvalidTransition { .. });
     // approved → rejected (walk-back) is forbidden — need to go obsolete.
     fix_plans::update_status(&conn, r.id, FixPlanStatus::Sent, None).unwrap();
     fix_plans::update_status(&conn, r.id, FixPlanStatus::Approved, None).unwrap();
-    let err = fix_plans::update_status(&conn, r.id, FixPlanStatus::Rejected, None)
-        .unwrap_err();
+    let err = fix_plans::update_status(&conn, r.id, FixPlanStatus::Rejected, None).unwrap_err();
     matches!(err, UpdateStatusError::InvalidTransition { .. });
 }
 

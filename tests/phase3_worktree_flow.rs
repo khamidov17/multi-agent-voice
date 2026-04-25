@@ -12,32 +12,36 @@
 //! verifies the Phase 0 invariant — writes to the worktree do NOT
 //! modify the main clone — under the full compose flow.
 
-use trio::chatbot::git_ops;
-use trio::chatbot::worktree::{WorktreeManager};
 use serial_test::serial;
 use std::fs;
+use trio::chatbot::git_ops;
+use trio::chatbot::worktree::WorktreeManager;
 
 /// Init a throwaway repo with a single commit on `main`.
 fn mk_repo() -> tempfile::TempDir {
     let td = tempfile::tempdir().unwrap();
     let p = td.path();
-    assert!(std::process::Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(p)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(p)
+            .status()
+            .unwrap()
+            .success()
+    );
     for args in [
         vec!["config", "user.name", "Phase 3 Test"],
         vec!["config", "user.email", "test@example.com"],
         vec!["config", "commit.gpgsign", "false"],
     ] {
-        assert!(std::process::Command::new("git")
-            .args(&args)
-            .current_dir(p)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(p)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
     fs::write(p.join("README.md"), "# test\n").unwrap();
     git_ops::stage_all(p).unwrap();
@@ -51,8 +55,7 @@ async fn worktree_open_write_commit_close_lifecycle() {
     let td = mk_repo();
     let wt_root = td.path().join("worktrees");
     let mgr =
-        WorktreeManager::with_explicit_roots(td.path().to_path_buf(), wt_root.clone())
-            .unwrap();
+        WorktreeManager::with_explicit_roots(td.path().to_path_buf(), wt_root.clone()).unwrap();
 
     // Nova enters implementation mode for plan 42.
     let handle = mgr.open_worktree(42, "main").unwrap();
@@ -67,8 +70,10 @@ async fn worktree_open_write_commit_close_lifecycle() {
     fs::create_dir_all(handle.worktree_path.join("sub")).unwrap();
     fs::write(handle.worktree_path.join("sub").join("new3.txt"), "third").unwrap();
 
-    assert!(!git_ops::is_clean(&handle.worktree_path).unwrap(),
-            "worktree must be dirty after writes");
+    assert!(
+        !git_ops::is_clean(&handle.worktree_path).unwrap(),
+        "worktree must be dirty after writes"
+    );
 
     // commit_and_push dispatch simulation — stage + commit (skip push,
     // no remote configured on this test repo).
@@ -79,8 +84,10 @@ async fn worktree_open_write_commit_close_lifecycle() {
     )
     .unwrap();
     assert_eq!(sha.len(), 7);
-    assert!(git_ops::is_clean(&handle.worktree_path).unwrap(),
-            "worktree must be clean after commit");
+    assert!(
+        git_ops::is_clean(&handle.worktree_path).unwrap(),
+        "worktree must be clean after commit"
+    );
 
     // Log line lives on the feature branch.
     let commits = git_ops::recent_commits(&handle.worktree_path, 3).unwrap();
@@ -123,11 +130,9 @@ async fn phase0_invariant_holds_writes_to_worktree_dont_touch_main_source() {
     // Worktrees live in a SEPARATE tempdir so `is_clean(main_clone)`
     // doesn't see the worktree directory itself as untracked.
     let wt_td = tempfile::tempdir().unwrap();
-    let mgr = WorktreeManager::with_explicit_roots(
-        td.path().to_path_buf(),
-        wt_td.path().to_path_buf(),
-    )
-    .unwrap();
+    let mgr =
+        WorktreeManager::with_explicit_roots(td.path().to_path_buf(), wt_td.path().to_path_buf())
+            .unwrap();
 
     // Create an actual source file we want to "modify" via the worktree.
     let main_source = td.path().join("src.rs");
@@ -139,7 +144,10 @@ async fn phase0_invariant_holds_writes_to_worktree_dont_touch_main_source() {
 
     // Scribble on the worktree's copy of src.rs.
     let worktree_src = h.worktree_path.join("src.rs");
-    assert!(worktree_src.exists(), "worktree should have the source file");
+    assert!(
+        worktree_src.exists(),
+        "worktree should have the source file"
+    );
     fs::write(&worktree_src, "MUTATED IN WORKTREE\n").unwrap();
 
     // Main clone must NOT reflect the change.
@@ -173,11 +181,8 @@ async fn phase0_invariant_holds_writes_to_worktree_dont_touch_main_source() {
 #[serial]
 async fn multiple_concurrent_worktrees_dont_interfere() {
     let td = mk_repo();
-    let mgr = WorktreeManager::with_explicit_roots(
-        td.path().to_path_buf(),
-        td.path().join("wt"),
-    )
-    .unwrap();
+    let mgr = WorktreeManager::with_explicit_roots(td.path().to_path_buf(), td.path().join("wt"))
+        .unwrap();
 
     let h1 = mgr.open_worktree(1, "main").unwrap();
     let h5 = mgr.open_worktree(5, "main").unwrap();
@@ -197,7 +202,12 @@ async fn multiple_concurrent_worktrees_dont_interfere() {
     // Each worktree has exactly `init` + its own commit = 2 commits.
     for h in [&h1, &h5, &h9] {
         let log = git_ops::recent_commits(&h.worktree_path, 10).unwrap();
-        assert_eq!(log.len(), 2, "plan {} history should have 2 commits", h.plan_id);
+        assert_eq!(
+            log.len(),
+            2,
+            "plan {} history should have 2 commits",
+            h.plan_id
+        );
         let branch = git_ops::current_branch(&h.worktree_path).unwrap();
         assert_eq!(branch.as_deref(), Some(h.branch.as_str()));
     }

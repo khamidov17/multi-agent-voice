@@ -101,7 +101,9 @@ pub fn current_branch(repo_dir: &Path) -> Result<Option<String>> {
                 Ok(Some(name.to_string()))
             }
         }
-        Err(GitError::CommandFailed { status: Some(1), .. }) => {
+        Err(GitError::CommandFailed {
+            status: Some(1), ..
+        }) => {
             // `symbolic-ref --quiet HEAD` exits 1 on detached HEAD.
             Ok(None)
         }
@@ -148,9 +150,7 @@ pub fn validate_branch_name(name: &str) -> Result<()> {
         )));
     }
     for c in name.chars() {
-        let ok = c.is_ascii_lowercase()
-            || c.is_ascii_digit()
-            || matches!(c, '/' | '_' | '.' | '-');
+        let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '/' | '_' | '.' | '-');
         if !ok {
             return Err(GitError::InvalidArg(format!(
                 "branch name has forbidden char {:?}: {}",
@@ -179,11 +179,7 @@ pub fn validate_branch_name(name: &str) -> Result<()> {
 
 /// Create a new branch from `base_ref` and check it out. Fails if the
 /// branch already exists.
-pub fn create_and_checkout_branch(
-    repo_dir: &Path,
-    branch: &str,
-    base_ref: &str,
-) -> Result<()> {
+pub fn create_and_checkout_branch(repo_dir: &Path, branch: &str, base_ref: &str) -> Result<()> {
     validate_branch_name(branch)?;
     run(repo_dir, &["checkout", "-b", branch, base_ref])?;
     Ok(())
@@ -242,12 +238,7 @@ pub fn commit(repo_dir: &Path, message: &str) -> Result<String> {
 /// relationship on first push. Uses whatever auth git is already
 /// configured with (HTTPS cred helper, SSH agent, etc.) — we do not
 /// touch credentials from inside this process.
-pub fn push(
-    repo_dir: &Path,
-    remote: &str,
-    branch: &str,
-    set_upstream: bool,
-) -> Result<()> {
+pub fn push(repo_dir: &Path, remote: &str, branch: &str, set_upstream: bool) -> Result<()> {
     validate_branch_name(branch)?;
     if !is_valid_remote(remote) {
         return Err(GitError::InvalidArg(format!(
@@ -285,14 +276,7 @@ pub struct CommitInfo {
 /// Return the last `n` commits on the current branch, subject-only.
 pub fn recent_commits(repo_dir: &Path, n: usize) -> Result<Vec<CommitInfo>> {
     let n_arg = format!("-{}", n.max(1));
-    let out = run(
-        repo_dir,
-        &[
-            "log",
-            &n_arg,
-            "--pretty=format:%h|%s",
-        ],
-    )?;
+    let out = run(repo_dir, &["log", &n_arg, "--pretty=format:%h|%s"])?;
     let commits = out
         .lines()
         .filter_map(|line| {

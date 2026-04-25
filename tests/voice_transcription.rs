@@ -8,9 +8,9 @@
 
 #[cfg(feature = "integ_test")]
 mod tests {
+    use std::path::PathBuf;
     use trio::chatbot::message::ChatMessage;
     use trio::chatbot::whisper::Whisper;
-    use std::path::PathBuf;
 
     /// Path to test Whisper model (set via env var or default location)
     fn get_test_model_path() -> PathBuf {

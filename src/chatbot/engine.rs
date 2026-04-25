@@ -881,9 +881,7 @@ impl ChatbotEngine {
         //   - the bot is Tier 1 (fix plans are Nova-only)
         //   - the message starts with an approval keyword
         // Non-matching messages fall through to the normal pending queue.
-        if self.config.full_permissions
-            && Some(msg.user_id) == self.config.owner_user_id
-        {
+        if self.config.full_permissions && Some(msg.user_id) == self.config.owner_user_id {
             match crate::chatbot::fix_plan_reply::parse_owner_reply(&msg.text) {
                 crate::chatbot::fix_plan_reply::OwnerReply::None => {}
                 reply => {
@@ -922,8 +920,7 @@ impl ChatbotEngine {
                     // Wake symmetry: also notify when quick lane receives a
                     // message, in case the deep-lane sleep was what made
                     // this route "busy" in the first place.
-                    crate::chatbot::event_bus::global_event_bus()
-                        .wake(&self.config.bot_name);
+                    crate::chatbot::event_bus::global_event_bus().wake(&self.config.bot_name);
                     if let Some(ref debouncer) = self.quick_debouncer {
                         debouncer.trigger().await;
                     }

@@ -98,10 +98,9 @@ pub fn execute_read_alerts(
         "total_open": json_rows.len(),
         "alerts": json_rows,
     });
-    Ok(Some(
-        serde_json::to_string(&body)
-            .unwrap_or_else(|_| r#"{"error":"serialization"}"#.to_string()),
-    ))
+    Ok(Some(serde_json::to_string(&body).unwrap_or_else(|_| {
+        r#"{"error":"serialization"}"#.to_string()
+    })))
 }
 
 pub fn execute_mark_triaged(
@@ -116,8 +115,7 @@ pub fn execute_mark_triaged(
     let db_path = alerts_db_path(config)?;
     let conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| format!("mark_triaged: open {}: {}", db_path.display(), e))?;
-    alerts::init_schema(&conn)
-        .map_err(|e| format!("mark_triaged: init_schema: {}", e))?;
+    alerts::init_schema(&conn).map_err(|e| format!("mark_triaged: init_schema: {}", e))?;
     let closed = alerts::mark_triaged(&conn, alert_ids, note)
         .map_err(|e| format!("mark_triaged: update: {}", e))?;
     Ok(Some(
@@ -149,8 +147,7 @@ pub async fn execute_send_triage_report(
     let db_path = alerts_db_path(config)?;
     let conn = rusqlite::Connection::open(&db_path)
         .map_err(|e| format!("send_triage_report: open {}: {}", db_path.display(), e))?;
-    alerts::init_schema(&conn)
-        .map_err(|e| format!("send_triage_report: init_schema: {}", e))?;
+    alerts::init_schema(&conn).map_err(|e| format!("send_triage_report: init_schema: {}", e))?;
 
     let rows = alerts::query_open_alerts(&conn, None, None, Some(READ_ALERTS_MAX_LIMIT))
         .map_err(|e| format!("send_triage_report: query: {}", e))?;
@@ -199,10 +196,7 @@ fn format_triage_markdown(preamble: &str, rows: &[BugAlertRow]) -> String {
         return out;
     }
 
-    out.push_str(&format!(
-        "🚨 *Open alerts: {}*\n",
-        rows.len()
-    ));
+    out.push_str(&format!("🚨 *Open alerts: {}*\n", rows.len()));
 
     // Group by severity so the owner can skip low-priority at a glance.
     let mut by_sev: std::collections::BTreeMap<u8, Vec<&BugAlertRow>> =
@@ -259,13 +253,7 @@ mod tests {
     use super::*;
     use serde_json::json as json_macro;
 
-    fn row(
-        id: i64,
-        severity: Severity,
-        category: &str,
-        summary: &str,
-        count: i64,
-    ) -> BugAlertRow {
+    fn row(id: i64, severity: Severity, category: &str, summary: &str, count: i64) -> BugAlertRow {
         BugAlertRow {
             id,
             fingerprint: "fp".into(),

@@ -142,10 +142,7 @@ impl WorktreeManager {
 
     /// Construct a manager with an explicit worktrees_root (for tests
     /// and unusual deploy layouts). Validates the repo is real.
-    pub fn with_explicit_roots(
-        repo_path: PathBuf,
-        worktrees_root: PathBuf,
-    ) -> Result<Self> {
+    pub fn with_explicit_roots(repo_path: PathBuf, worktrees_root: PathBuf) -> Result<Self> {
         let resolved_repo_root = git_ops::repo_root(&repo_path)
             .map_err(|e| WorktreeError::RepoInvalid(repo_path.clone(), e))?;
         Ok(Self {
@@ -165,18 +162,13 @@ impl WorktreeManager {
     /// Open a new worktree for `plan_id`, branching from `base_branch`.
     /// Creates `worktrees_root` if missing. Fails cleanly if a stale
     /// worktree or branch already exists.
-    pub fn open_worktree(
-        &self,
-        plan_id: i64,
-        base_branch: &str,
-    ) -> Result<WorktreeHandle> {
+    pub fn open_worktree(&self, plan_id: i64, base_branch: &str) -> Result<WorktreeHandle> {
         if plan_id <= 0 {
             return Err(WorktreeError::InvalidPlanId(plan_id));
         }
 
-        std::fs::create_dir_all(&self.worktrees_root).map_err(|e| {
-            WorktreeError::WorktreesRootUnwritable(self.worktrees_root.clone(), e)
-        })?;
+        std::fs::create_dir_all(&self.worktrees_root)
+            .map_err(|e| WorktreeError::WorktreesRootUnwritable(self.worktrees_root.clone(), e))?;
 
         let wt_path = self.worktree_path_for(plan_id);
         // Refuse to stomp on an existing non-empty directory — it may
@@ -242,11 +234,7 @@ impl WorktreeManager {
     /// and you want the local branch to stick around as a reference
     /// (e.g. for debugging). Use `true` for the common case where
     /// we're done with local state for this plan.
-    pub fn close_worktree(
-        &self,
-        handle: &WorktreeHandle,
-        delete_branch: bool,
-    ) -> Result<()> {
+    pub fn close_worktree(&self, handle: &WorktreeHandle, delete_branch: bool) -> Result<()> {
         // `git worktree remove --force` removes the worktree even if
         // it has uncommitted changes. We use --force because Phase 3
         // flows call close AFTER commit + push succeeded; any lingering
@@ -273,9 +261,9 @@ impl WorktreeManager {
             // be reaped. If branch is gone already, swallow the error.
             match run_git_in(&self.repo_path, &["branch", "-D", &handle.branch]) {
                 Ok(_) => {}
-                Err(WorktreeError::Git(GitError::CommandFailed {
-                    stderr, ..
-                })) if stderr.contains("not found") || stderr.contains("not exist") => {
+                Err(WorktreeError::Git(GitError::CommandFailed { stderr, .. }))
+                    if stderr.contains("not found") || stderr.contains("not exist") =>
+                {
                     // Already gone.
                 }
                 Err(e) => return Err(e),
@@ -305,9 +293,8 @@ impl WorktreeManager {
             );
             // Belt-and-suspenders: if the dir still exists, rm -rf it.
             if wt_path.exists() {
-                std::fs::remove_dir_all(&wt_path).map_err(|e| {
-                    WorktreeError::WorktreesRootUnwritable(wt_path.clone(), e)
-                })?;
+                std::fs::remove_dir_all(&wt_path)
+                    .map_err(|e| WorktreeError::WorktreesRootUnwritable(wt_path.clone(), e))?;
             }
             let _ = run_git_in(&self.repo_path, &["worktree", "prune"]);
         }
@@ -397,11 +384,8 @@ mod tests {
     fn open_creates_worktree_and_branch_off_main() {
         let td = mk_repo();
         let wt_root = td.path().join("wt-root");
-        let mgr = WorktreeManager::with_explicit_roots(
-            td.path().to_path_buf(),
-            wt_root.clone(),
-        )
-        .unwrap();
+        let mgr =
+            WorktreeManager::with_explicit_roots(td.path().to_path_buf(), wt_root.clone()).unwrap();
 
         let h = mgr.open_worktree(42, "main").unwrap();
         assert_eq!(h.plan_id, 42);
@@ -422,8 +406,14 @@ mod tests {
             td.path().join("wt-root"),
         )
         .unwrap();
-        matches!(mgr.open_worktree(0, "main"), Err(WorktreeError::InvalidPlanId(0)));
-        matches!(mgr.open_worktree(-1, "main"), Err(WorktreeError::InvalidPlanId(-1)));
+        matches!(
+            mgr.open_worktree(0, "main"),
+            Err(WorktreeError::InvalidPlanId(0))
+        );
+        matches!(
+            mgr.open_worktree(-1, "main"),
+            Err(WorktreeError::InvalidPlanId(-1))
+        );
     }
 
     #[test]
@@ -470,15 +460,13 @@ mod tests {
         let h = mgr.open_worktree(9, "main").unwrap();
         assert!(h.worktree_path.exists());
         // Branch exists locally.
-        let branch_list =
-            run_git_in(td.path(), &["branch", "--list", "phase-3/plan-9"]).unwrap();
+        let branch_list = run_git_in(td.path(), &["branch", "--list", "phase-3/plan-9"]).unwrap();
         assert!(branch_list.contains("phase-3/plan-9"));
 
         mgr.close_worktree(&h, true).unwrap();
         assert!(!h.worktree_path.exists());
         // Branch is gone locally.
-        let branch_list =
-            run_git_in(td.path(), &["branch", "--list", "phase-3/plan-9"]).unwrap();
+        let branch_list = run_git_in(td.path(), &["branch", "--list", "phase-3/plan-9"]).unwrap();
         assert!(!branch_list.contains("phase-3/plan-9"));
     }
 
@@ -486,11 +474,8 @@ mod tests {
     fn open_refuses_stale_nonempty_directory() {
         let td = mk_repo();
         let wt_root = td.path().join("wt-root");
-        let mgr = WorktreeManager::with_explicit_roots(
-            td.path().to_path_buf(),
-            wt_root.clone(),
-        )
-        .unwrap();
+        let mgr =
+            WorktreeManager::with_explicit_roots(td.path().to_path_buf(), wt_root.clone()).unwrap();
 
         // Plant a stale non-empty directory where plan-33 would go.
         let stale = wt_root.join("plan-33");
@@ -507,11 +492,8 @@ mod tests {
     fn force_remove_stale_reaps_ghost_state() {
         let td = mk_repo();
         let wt_root = td.path().join("wt-root");
-        let mgr = WorktreeManager::with_explicit_roots(
-            td.path().to_path_buf(),
-            wt_root.clone(),
-        )
-        .unwrap();
+        let mgr =
+            WorktreeManager::with_explicit_roots(td.path().to_path_buf(), wt_root.clone()).unwrap();
 
         let h = mgr.open_worktree(55, "main").unwrap();
         // Simulate a crash that forgot to close — corrupt a file
@@ -522,9 +504,7 @@ mod tests {
         mgr.force_remove_stale(55).unwrap();
         assert!(!h.worktree_path.exists());
         // Branch also gone.
-        let branch_list =
-            run_git_in(td.path(), &["branch", "--list", "phase-3/plan-55"])
-                .unwrap();
+        let branch_list = run_git_in(td.path(), &["branch", "--list", "phase-3/plan-55"]).unwrap();
         assert!(!branch_list.contains("phase-3/plan-55"));
     }
 

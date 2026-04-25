@@ -73,9 +73,7 @@ pub fn parse_owner_reply(text: &str) -> OwnerReply {
     };
     // Remainder → note. Strip leading "because", "-", ":", etc.
     let note_raw = after[id_end..].trim();
-    let note = strip_note_prefix(note_raw)
-        .trim()
-        .to_string();
+    let note = strip_note_prefix(note_raw).trim().to_string();
     let note = if note.is_empty() { None } else { Some(note) };
     match kind {
         "approve" => OwnerReply::Approve { plan_id, note },
@@ -106,13 +104,20 @@ pub async fn apply_owner_reply(
 ) {
     let (plan_id, new_status, note, kind_label) = match reply {
         OwnerReply::None => return,
-        OwnerReply::Approve { plan_id, note } => (plan_id, FixPlanStatus::Approved, note, "approved"),
-        OwnerReply::Reject { plan_id, note } => (plan_id, FixPlanStatus::Rejected, note, "rejected"),
+        OwnerReply::Approve { plan_id, note } => {
+            (plan_id, FixPlanStatus::Approved, note, "approved")
+        }
+        OwnerReply::Reject { plan_id, note } => {
+            (plan_id, FixPlanStatus::Rejected, note, "rejected")
+        }
     };
     let data_dir = match config.data_dir.as_ref() {
         Some(p) => p,
         None => {
-            warn!(plan_id, "fix_plan_reply: data_dir not set — cannot apply owner reply");
+            warn!(
+                plan_id,
+                "fix_plan_reply: data_dir not set — cannot apply owner reply"
+            );
             return;
         }
     };
@@ -135,7 +140,9 @@ pub async fn apply_owner_reply(
             info!(
                 plan_id = row.id,
                 status = row.status.as_str(),
-                "fix_plan_reply: owner {} plan #{}", kind_label, plan_id
+                "fix_plan_reply: owner {} plan #{}",
+                kind_label,
+                plan_id
             );
             let confirmation = format!(
                 "✅ plan #{} {} — noted. {}",
@@ -153,10 +160,7 @@ pub async fn apply_owner_reply(
         Err(e) => {
             warn!(plan_id, err = %e, "fix_plan_reply: status transition failed");
             // Give the owner a heads-up so they know the reply didn't land.
-            let msg = format!(
-                "⚠️ couldn't {} plan #{}: {}",
-                kind_label, plan_id, e
-            );
+            let msg = format!("⚠️ couldn't {} plan #{}: {}", kind_label, plan_id, e);
             let _ = telegram.send_message(chat_id, &msg, None).await;
         }
     }

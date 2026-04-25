@@ -16,13 +16,13 @@
 #![allow(clippy::await_holding_lock)]
 
 use bootstrap_guardian::{Guardian, GuardianConfig};
-use trio::chatbot::database::Database;
-use trio::chatbot::engine::ChatbotConfig;
-use trio::guardian_client::{GuardianClient, WriteResult};
 use serial_test::serial;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use trio::chatbot::database::Database;
+use trio::chatbot::engine::ChatbotConfig;
+use trio::guardian_client::{GuardianClient, WriteResult};
 
 /// Spin up a real guardian on a tempdir-scoped UDS socket + key. Returns
 /// the temp directory (kept alive by the caller), socket path, and
@@ -120,7 +120,14 @@ async fn end_to_end_allowed_write_lands_on_disk() {
     let db = Mutex::new(Database::new());
 
     let target = allowed.join("hello.txt");
-    let r = run_protected_write(&cfg, &db, target.to_str().unwrap(), "hi", "integration test").await;
+    let r = run_protected_write(
+        &cfg,
+        &db,
+        target.to_str().unwrap(),
+        "hi",
+        "integration test",
+    )
+    .await;
     assert!(matches!(r, WriteResult::Ok { written_bytes: 2 }));
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi");
 }

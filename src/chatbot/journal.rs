@@ -137,7 +137,9 @@ impl JournalWriter {
         // Ensure the table exists (idempotent) so a journal event fired
         // before the engine's own init doesn't error.
         create_journal_table(&conn)?;
-        Ok(Self::spawn(std::sync::Arc::new(std::sync::Mutex::new(conn))))
+        Ok(Self::spawn(std::sync::Arc::new(std::sync::Mutex::new(
+            conn,
+        ))))
     }
 
     /// Spawn with an already-opened connection wrapped in Arc<Mutex<>>.
@@ -173,7 +175,10 @@ impl JournalWriter {
                     }
                 }
             }
-            tracing::info!(drained, "journal writer channel closed; draining thread exiting");
+            tracing::info!(
+                drained,
+                "journal writer channel closed; draining thread exiting"
+            );
         });
         Self { tx }
     }
@@ -649,7 +654,10 @@ mod tests {
             panic!("intentional poison");
         });
         let result = add_entry(&conn, None, ENTRY_TOOL_CALL, "summary", "detail", &[], &[]);
-        assert!(result.is_err(), "poisoned mutex must produce Err, not panic");
+        assert!(
+            result.is_err(),
+            "poisoned mutex must produce Err, not panic"
+        );
         // emit also must not panic on a poisoned mutex.
         emit(&conn, None, ENTRY_TOOL_CALL, "s", "d", &[], &[]);
     }
@@ -709,14 +717,7 @@ mod tests {
         let writer = JournalWriter::spawn(std::sync::Arc::clone(&conn));
         let start = std::time::Instant::now();
         for i in 0..100 {
-            writer.emit(
-                None,
-                ENTRY_TOOL_CALL,
-                &format!("ev-{}", i),
-                "",
-                &[],
-                &[],
-            );
+            writer.emit(None, ENTRY_TOOL_CALL, &format!("ev-{}", i), "", &[], &[]);
         }
         let elapsed = start.elapsed();
         assert!(
