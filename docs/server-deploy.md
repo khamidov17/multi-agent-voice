@@ -16,7 +16,7 @@ Assumes:
 ## 1 — Pull main + build
 
 ```bash
-ssh ava@<deploy-host>
+ssh ava@159.89.132.178   # DigitalOcean droplet
 cd ~/trio-local
 git fetch origin
 git checkout main
@@ -233,7 +233,7 @@ state change, no shell on the deploy box required).
 
 ```bash
 # Deploy refresh after a new PR lands on main:
-ssh ava@<deploy-host>
+ssh ava@159.89.132.178   # DigitalOcean droplet
 cd ~/trio-local && git pull --ff-only && \
   cargo build --release -p trio && \
   cargo build --release -p bootstrap-guardian && \
