@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::fmt_equiv::{self, FmtCheckResult};
 use crate::protected_paths;
+use crate::toolchain;
 use crate::verdict::Verdict;
 
 /// Classifier input: what the workflow hands us per PR.
@@ -36,7 +37,21 @@ pub fn classify(input: &ClassifyInput) -> Result<Verdict> {
         return Ok(Verdict::ineligible_protected(touched));
     }
 
-    // Gate 3: fmt-equivalence. This shells out to `cargo fmt --check`.
+    // Gate 3: toolchain hash drift. The classifier binary was built against
+    // a SHA of `rust-toolchain.toml` embedded at compile time. If the live
+    // file in the repo doesn't match (e.g., the workflow's cached build is
+    // stale relative to a `main` that bumped the toolchain), fail closed —
+    // rustfmt's output isn't reliably reproducible across toolchains.
+    if let Some(drift_msg) = toolchain::check_drift(&input.repo_root)
+        .context("toolchain drift check failed")?
+    {
+        return Ok(Verdict::ineligible_toolchain_drift(
+            drift_msg,
+            toolchain::embedded_hash().to_string(),
+        ));
+    }
+
+    // Gate 4: fmt-equivalence. This shells out to `cargo fmt --check`.
     let fmt_result = fmt_equiv::check_with_cargo(&input.repo_root)
         .context("fmt-equivalence check failed to run")?;
 
