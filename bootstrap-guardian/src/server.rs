@@ -243,7 +243,10 @@ impl Guardian {
     }
 
     fn process_line(&self, uid: u32, line: &str) -> Resp {
-        // Paused mode — admin break-glass via `guardianctl pause`.
+        // Paused mode — admin break-glass via `guardianctl pause`. Returning
+        // Paused before HMAC is intentional: pause is operator-observable
+        // state, not a secret. An attacker can't exploit the guardian while
+        // it's paused — pausing IS the security action.
         if self.cfg.pause_flag_path().exists() {
             self.audit.write(&AuditEvent {
                 ts: AuditLog::now(),
@@ -258,24 +261,13 @@ impl Guardian {
             return Resp::err(ErrCode::Paused, "guardian is admin-paused");
         }
 
-        // UID check — before any parse attempt. No need to reveal error shape
-        // to unauthorized callers.
-        if !self.cfg.allowed_uids.contains(&uid) {
-            self.audit.write(&AuditEvent {
-                ts: AuditLog::now(),
-                uid,
-                op: "?",
-                path: String::new(),
-                decision: "uid_mismatch",
-                bytes: None,
-                reason: None,
-                err: Some("uid_mismatch"),
-            });
-            return Resp::err(
-                ErrCode::UidMismatch,
-                format!("uid {} is not registered with this guardian", uid),
-            );
-        }
+        // NOTE: UID check moved AFTER HMAC verify (see below). Doing it here
+        // before HMAC leaked allowed_uids enumeration: an attacker without the
+        // key but with UDS access could probe by source UID and observe
+        // UidMismatch vs other errors to learn which UIDs the guardian
+        // accepts. With UID-after-HMAC, only callers who already proved key
+        // possession can ever see UidMismatch. (TODOS Phase 0 → /review
+        // security: HMAC ordering side-channel.)
 
         let req: Req = match serde_json::from_str(line) {
             Ok(r) => r,
@@ -382,7 +374,9 @@ impl Guardian {
             Op::Write | Op::Ping => std::borrow::Cow::Borrowed(self.key.as_slice()),
         };
 
-        // HMAC check — constant-time, over canonical triple.
+        // HMAC check — constant-time, over canonical triple. This MUST come
+        // before the UID gate so an attacker without the key cannot enumerate
+        // allowed_uids by observing UidMismatch vs other error codes.
         let expected = compute_hmac(&key_for_verify, req.op, &req.path, &bytes, req.nonce);
         if !constant_time_eq(&expected, &req.hmac) {
             self.audit.write(&AuditEvent {
@@ -396,6 +390,29 @@ impl Guardian {
                 err: Some("bad_hmac"),
             });
             return Resp::err(ErrCode::BadHmac, "HMAC mismatch");
+        }
+
+        // UID gate — runs AFTER HMAC verify. Reaching this branch proves the
+        // caller possesses the shared key (Op::Write/Ping) or the override key
+        // (Op::OverrideWrite), so revealing UidMismatch is no longer a leak —
+        // an attacker who already has the key isn't going to be deterred by
+        // an opaque error response. (Moved from pre-parse position 2026-04-25
+        // per Phase 0 deferred-from-/review security item.)
+        if !self.cfg.allowed_uids.contains(&uid) {
+            self.audit.write(&AuditEvent {
+                ts: AuditLog::now(),
+                uid,
+                op: op_tag(req.op),
+                path: req.path.clone(),
+                decision: "uid_mismatch",
+                bytes: Some(bytes.len() as u64),
+                reason: req.reason.as_deref(),
+                err: Some("uid_mismatch"),
+            });
+            return Resp::err(
+                ErrCode::UidMismatch,
+                format!("uid {} is not registered with this guardian", uid),
+            );
         }
 
         // Nonce — replay protection. Two-phase pattern:
